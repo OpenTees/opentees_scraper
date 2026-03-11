@@ -18,7 +18,21 @@ jobs:
         with:
           node-version: 20
 
+      - name: Install Playwright
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
       - name: Run scraper
         run: node scraper/scrape.js
         env:
           MANUAL_IMPORT_SECRET: ${{ secrets.MANUAL_IMPORT_SECRET }}
+
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-artifacts
+          path: scraper-output
+          if-no-files-found: ignore
