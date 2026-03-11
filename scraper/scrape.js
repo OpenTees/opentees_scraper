@@ -4,14 +4,72 @@ const { chromium } = require("playwright");
 
 const OUTPUT_DIR = path.join(process.cwd(), "scraper-output");
 
-async function ensureOutputDir() {
+function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
+function monthNameToNumber(monthName) {
+  const months = {
+    january: "01",
+    february: "02",
+    march: "03",
+    april: "04",
+    may: "05",
+    june: "06",
+    july: "07",
+    august: "08",
+    september: "09",
+    october: "10",
+    november: "11",
+    december: "12"
+  };
+
+  return months[String(monthName || "").toLowerCase()] || null;
+}
+
+function extractSlotDateFromBody(bodyText) {
+  const match = bodyText.match(
+    /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Fri|Sat|Sun),?\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\b/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const day = String(match[1]).padStart(2, "0");
+  const month = monthNameToNumber(match[2]);
+  const year = new Date().getUTCFullYear();
+
+  if (!month) {
+    return null;
+  }
+
+  return `${year}-${month}-${day}`;
+}
+
+function normalisePrice(priceText) {
+  const cleaned = String(priceText || "").replace(/[^\d.]/g, "");
+  const value = Number(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
+function buildExternalId(courseSlug, slotDate, slotTime, price) {
+  return `ig-${courseSlug}-${slotDate}-${slotTime}-${price ?? "na"}`;
+}
+
 async function run() {
-  await ensureOutputDir();
+  ensureOutputDir();
+
+  const importSecret = process.env.MANUAL_IMPORT_SECRET;
+
+  if (!importSecret) {
+    throw new Error("Missing MANUAL_IMPORT_SECRET");
+  }
 
   const targetUrl = "https://members.manningsheath.com/visitorbooking/";
+  const courseName = "Mannings Heath Golf Club";
+  const providerCourseId = "intelligent-golf-mannings-heath";
+  const courseSlug = "mannings-heath";
 
   const browser = await chromium.launch({
     headless: true
@@ -33,25 +91,65 @@ async function run() {
   const title = await page.title();
   const finalUrl = page.url();
 
-  const h1s = await page.locator("h1").allTextContents().catch(() => []);
-  const h2s = await page.locator("h2").allTextContents().catch(() => []);
-  const buttons = await page.locator("button").allTextContents().catch(() => []);
-  const links = await page.locator("a").allTextContents().catch(() => []);
-
   const bodyText = await page.locator("body").innerText().catch(() => "");
-  const bodyPreview = bodyText
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 3000);
+  const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 3000);
+  const slotDate = extractSlotDateFromBody(bodyText);
+
+  if (!slotDate) {
+    throw new Error("Could not detect slot date from page body");
+  }
+
+  const linkHandles = await page.locator("a").elementHandles();
+  const extractedRows = [];
+
+  for (const linkHandle of linkHandles) {
+    const text = (await linkHandle.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    const href = await linkHandle.getAttribute("href").catch(() => null);
+
+    const match = text.match(/(\d{1,2}:\d{2})\s*£\s*([0-9]+(?:\.[0-9]{2})?)/i);
+
+    if (!match) {
+      continue;
+    }
+
+    const slotTime = match[1];
+    const price = normalisePrice(match[2]);
+
+    const bookingUrl = href
+      ? new URL(href, finalUrl).toString()
+      : finalUrl;
+
+    extractedRows.push({
+      external_id: buildExternalId(courseSlug, slotDate, slotTime, price),
+      provider_course_id: providerCourseId,
+      course_name: courseName,
+      slot_date: slotDate,
+      slot_time: slotTime,
+      price,
+      players: 4,
+      booking_url: bookingUrl,
+      raw_payload: {
+        source: "intelligent_golf",
+        club: courseName,
+        target_url: targetUrl,
+        final_url: finalUrl,
+        title,
+        link_text: text
+      }
+    });
+  }
+
+  const dedupedRows = Array.from(
+    new Map(extractedRows.map((row) => [row.external_id, row])).values()
+  );
 
   const pageInfo = {
     targetUrl,
     finalUrl,
     title,
-    h1s: h1s.slice(0, 10),
-    h2s: h2s.slice(0, 10),
-    buttons: buttons.map((t) => t.trim()).filter(Boolean).slice(0, 30),
-    links: links.map((t) => t.trim()).filter(Boolean).slice(0, 30),
+    slotDate,
+    extractedCount: dedupedRows.length,
+    extractedPreview: dedupedRows.slice(0, 10),
     bodyPreview
   };
 
@@ -67,6 +165,36 @@ async function run() {
 
   console.log("PAGE INFO:");
   console.log(JSON.stringify(pageInfo, null, 2));
+
+  if (dedupedRows.length === 0) {
+    throw new Error("No tee times were extracted from the page");
+  }
+
+  const payload = {
+    source_key: "manual_import",
+    rows: dedupedRows
+  };
+
+  const response = await fetch(
+    "https://edkpdujmnwbiwowfwvpr.supabase.co/functions/v1/ingest-tee-times",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-import-secret": importSecret
+      },
+      body: JSON.stringify(payload)
+    }
+  );
+
+  const responseText = await response.text();
+
+  console.log("IMPORT STATUS:", response.status);
+  console.log("IMPORT RESPONSE:", responseText);
+
+  if (!response.ok) {
+    throw new Error(`Import failed: ${response.status} ${responseText}`);
+  }
 
   await browser.close();
 }
