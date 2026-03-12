@@ -17,6 +17,13 @@ const COURSES = [
     providerCourseId: "intelligent-golf-reigate-hill",
     courseSlug: "reigate-hill",
   },
+  {
+    targetUrl:
+      "https://www.charthamparkgolfclub.com/visitorbooking/?_gl=1*d7dol7*_gcl_au*MTU1NzYyNzY4NS4xNzczMjQ4ODEw*_ga*MTM5ODU3MTQyOS4xNzczMjQ4ODA4*_ga_5SFCQVMKTR*czE3NzMyNDg4MDgkbzEkZzAkdDE3NzMyNDg4MDgkajYwJGwwJGgw",
+    courseName: "Chartham Park Golf & Country Club",
+    providerCourseId: "intelligent-golf-chartham-park",
+    courseSlug: "chartham-park",
+  },
 ];
 
 function ensureOutputDir() {
