@@ -21,7 +21,7 @@ function monthNameToNumber(monthName) {
     september: "09",
     october: "10",
     november: "11",
-    december: "12"
+    december: "12",
   };
 
   return months[String(monthName || "").toLowerCase()] || null;
@@ -29,7 +29,7 @@ function monthNameToNumber(monthName) {
 
 function extractSlotDateFromBody(bodyText) {
   const match = bodyText.match(
-    /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Fri|Sat|Sun),?\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\b/i
+    /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Fri|Sat|Sun),?\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\b/i,
   );
 
   if (!match) {
@@ -72,21 +72,30 @@ async function run() {
   const courseSlug = "mannings-heath";
 
   const browser = await chromium.launch({
-    headless: true
+    headless: true,
   });
 
   const page = await browser.newPage({
-    viewport: { width: 1440, height: 1200 }
+    viewport: { width: 1440, height: 1200 },
   });
 
   console.log("Opening:", targetUrl);
 
   await page.goto(targetUrl, {
     waitUntil: "domcontentloaded",
-    timeout: 90000
+    timeout: 90000,
   });
 
-  await page.waitForTimeout(5000);
+  // Give the page time to render properly
+  await page.waitForTimeout(3000);
+
+  // Try to accept cookies if the banner appears
+  await page.click("text=ACCEPT COOKIES").catch(() => {});
+  await page.click("text=Accept Cookies").catch(() => {});
+  await page.click("text=Accept cookies").catch(() => {});
+
+  // Give the page more time after cookie interaction
+  await page.waitForTimeout(8000);
 
   const title = await page.title();
   const finalUrl = page.url();
@@ -96,7 +105,30 @@ async function run() {
   const slotDate = extractSlotDateFromBody(bodyText);
 
   if (!slotDate) {
-    throw new Error("Could not detect slot date from page body");
+    await page.screenshot({
+      path: path.join(OUTPUT_DIR, "manningsheath-visitorbooking.png"),
+      fullPage: true,
+    });
+
+    fs.writeFileSync(
+      path.join(OUTPUT_DIR, "page-info.json"),
+      JSON.stringify(
+        {
+          targetUrl,
+          finalUrl,
+          title,
+          bodyPreview,
+          extractedCount: 0,
+          note: "Could not detect slot date from page body",
+        },
+        null,
+        2,
+      ),
+    );
+
+    console.log("No slot date detected from page body. Exiting cleanly.");
+    await browser.close();
+    process.exit(0);
   }
 
   const linkHandles = await page.locator("a").elementHandles();
@@ -134,13 +166,13 @@ async function run() {
         target_url: targetUrl,
         final_url: finalUrl,
         title,
-        link_text: text
-      }
+        link_text: text,
+      },
     });
   }
 
   const dedupedRows = Array.from(
-    new Map(extractedRows.map((row) => [row.external_id, row])).values()
+    new Map(extractedRows.map((row) => [row.external_id, row])).values(),
   );
 
   const pageInfo = {
@@ -150,29 +182,32 @@ async function run() {
     slotDate,
     extractedCount: dedupedRows.length,
     extractedPreview: dedupedRows.slice(0, 10),
-    bodyPreview
+    bodyPreview,
   };
 
   fs.writeFileSync(
     path.join(OUTPUT_DIR, "page-info.json"),
-    JSON.stringify(pageInfo, null, 2)
+    JSON.stringify(pageInfo, null, 2),
   );
 
   await page.screenshot({
     path: path.join(OUTPUT_DIR, "manningsheath-visitorbooking.png"),
-    fullPage: true
+    fullPage: true,
   });
 
   console.log("PAGE INFO:");
   console.log(JSON.stringify(pageInfo, null, 2));
 
+  // If there are no tee times, don't fail the workflow
   if (dedupedRows.length === 0) {
-    throw new Error("No tee times were extracted from the page");
+    console.log("No tee times found on the page. Exiting successfully.");
+    await browser.close();
+    process.exit(0);
   }
 
   const payload = {
     source_key: "manual_import",
-    rows: dedupedRows
+    rows: dedupedRows,
   };
 
   const response = await fetch(
@@ -181,10 +216,10 @@ async function run() {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-import-secret": importSecret
+        "x-import-secret": importSecret,
       },
-      body: JSON.stringify(payload)
-    }
+      body: JSON.stringify(payload),
+    },
   );
 
   const responseText = await response.text();
