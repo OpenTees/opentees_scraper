@@ -10,12 +10,16 @@ const COURSES = [
     courseName: "Mannings Heath Golf Club",
     providerCourseId: "intelligent-golf-mannings-heath",
     courseSlug: "mannings-heath",
+    googleRating: 4.3,
+    googleReviews: 1248,
   },
   {
     targetUrl: "https://reigatehill.intelligentgolf.co.uk/visitorbooking/",
     courseName: "Reigate Hill Golf Club",
     providerCourseId: "intelligent-golf-reigate-hill",
     courseSlug: "reigate-hill",
+    googleRating: 4.2,
+    googleReviews: 987,
   },
   {
     targetUrl:
@@ -23,6 +27,8 @@ const COURSES = [
     courseName: "Chartham Park Golf & Country Club",
     providerCourseId: "intelligent-golf-chartham-park",
     courseSlug: "chartham-park",
+    googleRating: 4.1,
+    googleReviews: 612,
   },
 ];
 
@@ -184,6 +190,8 @@ async function scrapeCourse(browser, courseConfig) {
       price,
       players: 4,
       booking_url: bookingUrl,
+      google_rating: courseConfig.googleRating,
+      google_reviews: courseConfig.googleReviews,
       raw_payload: {
         source: "intelligent_golf",
         club: courseConfig.courseName,
