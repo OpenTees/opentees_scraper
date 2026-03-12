@@ -4,6 +4,21 @@ const { chromium } = require("playwright");
 
 const OUTPUT_DIR = path.join(process.cwd(), "scraper-output");
 
+const COURSES = [
+  {
+    targetUrl: "https://members.manningsheath.com/visitorbooking/",
+    courseName: "Mannings Heath Golf Club",
+    providerCourseId: "intelligent-golf-mannings-heath",
+    courseSlug: "mannings-heath",
+  },
+  {
+    targetUrl: "https://reigatehill.intelligentgolf.co.uk/visitorbooking/",
+    courseName: "Reigate Hill Golf Club",
+    providerCourseId: "intelligent-golf-reigate-hill",
+    courseSlug: "reigate-hill",
+  },
+];
+
 function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
@@ -57,44 +72,26 @@ function buildExternalId(courseSlug, slotDate, slotTime, price) {
   return `ig-${courseSlug}-${slotDate}-${slotTime}-${price ?? "na"}`;
 }
 
-async function run() {
-  ensureOutputDir();
+async function tryAcceptCookies(page) {
+  await page.click("text=ACCEPT COOKIES").catch(() => {});
+  await page.click("text=Accept Cookies").catch(() => {});
+  await page.click("text=Accept cookies").catch(() => {});
+}
 
-  const importSecret = process.env.MANUAL_IMPORT_SECRET;
-
-  if (!importSecret) {
-    throw new Error("Missing MANUAL_IMPORT_SECRET");
-  }
-
-  const targetUrl = "https://members.manningsheath.com/visitorbooking/";
-  const courseName = "Mannings Heath Golf Club";
-  const providerCourseId = "intelligent-golf-mannings-heath";
-  const courseSlug = "mannings-heath";
-
-  const browser = await chromium.launch({
-    headless: true,
-  });
-
+async function scrapeCourse(browser, courseConfig) {
   const page = await browser.newPage({
     viewport: { width: 1440, height: 1200 },
   });
 
-  console.log("Opening:", targetUrl);
+  console.log(`Opening: ${courseConfig.targetUrl}`);
 
-  await page.goto(targetUrl, {
+  await page.goto(courseConfig.targetUrl, {
     waitUntil: "domcontentloaded",
     timeout: 90000,
   });
 
-  // Give the page time to render properly
   await page.waitForTimeout(3000);
-
-  // Try to accept cookies if the banner appears
-  await page.click("text=ACCEPT COOKIES").catch(() => {});
-  await page.click("text=Accept Cookies").catch(() => {});
-  await page.click("text=Accept cookies").catch(() => {});
-
-  // Give the page more time after cookie interaction
+  await tryAcceptCookies(page);
   await page.waitForTimeout(8000);
 
   const title = await page.title();
@@ -104,31 +101,46 @@ async function run() {
   const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 3000);
   const slotDate = extractSlotDateFromBody(bodyText);
 
+  const screenshotPath = path.join(
+    OUTPUT_DIR,
+    `${courseConfig.courseSlug}-visitorbooking.png`,
+  );
+
+  await page.screenshot({
+    path: screenshotPath,
+    fullPage: true,
+  });
+
   if (!slotDate) {
-    await page.screenshot({
-      path: path.join(OUTPUT_DIR, "manningsheath-visitorbooking.png"),
-      fullPage: true,
-    });
+    const info = {
+      targetUrl: courseConfig.targetUrl,
+      finalUrl,
+      title,
+      courseName: courseConfig.courseName,
+      providerCourseId: courseConfig.providerCourseId,
+      slotDate: null,
+      extractedCount: 0,
+      bodyPreview,
+      note: "Could not detect slot date from page body",
+    };
 
     fs.writeFileSync(
-      path.join(OUTPUT_DIR, "page-info.json"),
-      JSON.stringify(
-        {
-          targetUrl,
-          finalUrl,
-          title,
-          bodyPreview,
-          extractedCount: 0,
-          note: "Could not detect slot date from page body",
-        },
-        null,
-        2,
-      ),
+      path.join(OUTPUT_DIR, `${courseConfig.courseSlug}-page-info.json`),
+      JSON.stringify(info, null, 2),
     );
 
-    console.log("No slot date detected from page body. Exiting cleanly.");
-    await browser.close();
-    process.exit(0);
+    console.log(
+      `[${courseConfig.courseName}] No slot date detected from page body. Exiting cleanly for this course.`,
+    );
+
+    await page.close();
+
+    return {
+      ok: true,
+      course: courseConfig.courseName,
+      extractedRows: [],
+      info,
+    };
   }
 
   const linkHandles = await page.locator("a").elementHandles();
@@ -152,9 +164,14 @@ async function run() {
       : finalUrl;
 
     extractedRows.push({
-      external_id: buildExternalId(courseSlug, slotDate, slotTime, price),
-      provider_course_id: providerCourseId,
-      course_name: courseName,
+      external_id: buildExternalId(
+        courseConfig.courseSlug,
+        slotDate,
+        slotTime,
+        price,
+      ),
+      provider_course_id: courseConfig.providerCourseId,
+      course_name: courseConfig.courseName,
       slot_date: slotDate,
       slot_time: slotTime,
       price,
@@ -162,8 +179,8 @@ async function run() {
       booking_url: bookingUrl,
       raw_payload: {
         source: "intelligent_golf",
-        club: courseName,
-        target_url: targetUrl,
+        club: courseConfig.courseName,
+        target_url: courseConfig.targetUrl,
         final_url: finalUrl,
         title,
         link_text: text,
@@ -175,10 +192,12 @@ async function run() {
     new Map(extractedRows.map((row) => [row.external_id, row])).values(),
   );
 
-  const pageInfo = {
-    targetUrl,
+  const info = {
+    targetUrl: courseConfig.targetUrl,
     finalUrl,
     title,
+    courseName: courseConfig.courseName,
+    providerCourseId: courseConfig.providerCourseId,
     slotDate,
     extractedCount: dedupedRows.length,
     extractedPreview: dedupedRows.slice(0, 10),
@@ -186,28 +205,32 @@ async function run() {
   };
 
   fs.writeFileSync(
-    path.join(OUTPUT_DIR, "page-info.json"),
-    JSON.stringify(pageInfo, null, 2),
+    path.join(OUTPUT_DIR, `${courseConfig.courseSlug}-page-info.json`),
+    JSON.stringify(info, null, 2),
   );
 
-  await page.screenshot({
-    path: path.join(OUTPUT_DIR, "manningsheath-visitorbooking.png"),
-    fullPage: true,
-  });
+  console.log(`[${courseConfig.courseName}] PAGE INFO:`);
+  console.log(JSON.stringify(info, null, 2));
 
-  console.log("PAGE INFO:");
-  console.log(JSON.stringify(pageInfo, null, 2));
+  await page.close();
 
-  // If there are no tee times, don't fail the workflow
-  if (dedupedRows.length === 0) {
-    console.log("No tee times found on the page. Exiting successfully.");
-    await browser.close();
-    process.exit(0);
+  return {
+    ok: true,
+    course: courseConfig.courseName,
+    extractedRows: dedupedRows,
+    info,
+  };
+}
+
+async function importRows(importSecret, rows) {
+  if (!rows.length) {
+    console.log("No rows to import. Exiting successfully.");
+    return;
   }
 
   const payload = {
     source_key: "manual_import",
-    rows: dedupedRows,
+    rows,
   };
 
   const response = await fetch(
@@ -230,8 +253,65 @@ async function run() {
   if (!response.ok) {
     throw new Error(`Import failed: ${response.status} ${responseText}`);
   }
+}
+
+async function run() {
+  ensureOutputDir();
+
+  const importSecret = process.env.MANUAL_IMPORT_SECRET;
+
+  if (!importSecret) {
+    throw new Error("Missing MANUAL_IMPORT_SECRET");
+  }
+
+  const browser = await chromium.launch({
+    headless: true,
+  });
+
+  const allRows = [];
+  const courseResults = [];
+
+  for (const courseConfig of COURSES) {
+    try {
+      const result = await scrapeCourse(browser, courseConfig);
+      courseResults.push(result);
+      allRows.push(...result.extractedRows);
+    } catch (error) {
+      console.error(`[${courseConfig.courseName}] SCRAPE ERROR:`, error);
+
+      courseResults.push({
+        ok: false,
+        course: courseConfig.courseName,
+        extractedRows: [],
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   await browser.close();
+
+  const summary = {
+    totalCourses: COURSES.length,
+    successfulCourses: courseResults.filter((r) => r.ok).length,
+    failedCourses: courseResults.filter((r) => !r.ok).length,
+    totalRowsExtracted: allRows.length,
+    courses: courseResults.map((r) => ({
+      course: r.course,
+      ok: r.ok,
+      extractedCount: r.extractedRows ? r.extractedRows.length : 0,
+      error: r.error || null,
+    })),
+  };
+
+  fs.writeFileSync(
+    path.join(OUTPUT_DIR, "summary.json"),
+    JSON.stringify(summary, null, 2),
+  );
+
+  console.log("SCRAPE SUMMARY:");
+  console.log(JSON.stringify(summary, null, 2));
+
+  await importRows(importSecret, allRows);
 }
 
 run().catch((error) => {
