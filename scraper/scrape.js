@@ -30,32 +30,31 @@ const COURSES = [
     googleReviews: 612,
   },
 
-  // WORKING STRUCTURE COURSES (same pattern as your current ones)
-
-{
-  targetUrl: "https://members.cottesmoregolf.co.uk/visitorbooking/",
-  courseName: "Cottesmore Hotel Golf & Country Club",
-  providerCourseId: "intelligent-golf-cottesmore",
-  courseSlug: "cottesmore",
-  googleRating: 4.2,
-  googleReviews: 987,
-},
-{
-  targetUrl: "https://members.slinfoldgolf.co.uk/visitorbooking/",
-  courseName: "Slinfold Golf & Country Club",
-  providerCourseId: "intelligent-golf-slinfold",
-  courseSlug: "slinfold",
-  googleRating: 4.1,
-  googleReviews: 612,
-},
-{
-  targetUrl: "https://members.hamptongolf.co.uk/visitorbooking/",
-  courseName: "Hampton Court Palace Golf Club",
-  providerCourseId: "intelligent-golf-hampton",
-  courseSlug: "hampton-court",
-  googleRating: null,
-  googleReviews: null,
-}
+  // NEW VERIFIED COURSES
+  {
+    targetUrl: "https://www.theleatherheadclub.com/visitorbooking/",
+    courseName: "The Leatherhead Club",
+    providerCourseId: "intelligent-golf-leatherhead",
+    courseSlug: "leatherhead",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://www.kingswood-golf.co.uk/visitorbooking/",
+    courseName: "Kingswood Golf Club",
+    providerCourseId: "intelligent-golf-kingswood",
+    courseSlug: "kingswood",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://golf.addingtoncourt-golfclub.co.uk/visitorbooking/",
+    courseName: "Addington Court",
+    providerCourseId: "intelligent-golf-addington-court",
+    courseSlug: "addington-court",
+    googleRating: null,
+    googleReviews: null,
+  },
 ];
 
 function ensureOutputDir() {
