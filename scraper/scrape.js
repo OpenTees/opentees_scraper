@@ -53,8 +53,6 @@ const COURSES = [
     googleRating: null,
     googleReviews: null,
   },
-
-  // NEW VERIFIED COURSES
   {
     targetUrl: "https://www.ifieldgolf.com/visitorbooking/",
     courseName: "Ifield Golf Club",
@@ -149,15 +147,15 @@ function normalisePrice(priceText) {
   if (!priceText) return null;
 
   let cleaned = String(priceText)
-    .replace(/[^\d.]/g, "")       // remove junk
-    .replace(/(\..*)\./g, "$1")   // remove multiple dots
-    .replace(/^\./, "");          // no leading dot
+    .replace(/[^\d.]/g, "")
+    .replace(/(\..*)\./g, "$1")
+    .replace(/^\./, "");
 
   const value = Number(cleaned);
 
   if (!Number.isFinite(value)) return null;
 
-  return Math.round(value); // ✅ FORCE INTEGER (fixes DB crash)
+  return Math.round(value);
 }
 
 function buildExternalId(courseSlug, slotDate, slotTime, price) {
@@ -182,7 +180,10 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
 
     const slotTime = match[1];
     const price = normalisePrice(match[2]);
-    if (!price) continue;
+
+    if (!price) {
+      continue;
+    }
 
     const bookingUrl = row.href
       ? new URL(row.href, finalUrl).toString()
