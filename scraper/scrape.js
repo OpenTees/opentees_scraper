@@ -30,31 +30,32 @@ const COURSES = [
     googleReviews: 612,
   },
 
-  // NEW SURREY COURSES — same Intelligent Golf family
-  {
-    targetUrl: "https://drift.intelligentgolf.co.uk/",
-    courseName: "Drift Golf Club",
-    providerCourseId: "intelligent-golf-drift",
-    courseSlug: "drift",
-    googleRating: null,
-    googleReviews: null,
-  },
-  {
-    targetUrl: "https://milford.intelligentgolf.co.uk/",
-    courseName: "Milford Golf Club",
-    providerCourseId: "intelligent-golf-milford",
-    courseSlug: "milford",
-    googleRating: null,
-    googleReviews: null,
-  },
-  {
-    targetUrl: "https://cranleigh.intelligentgolf.co.uk/",
-    courseName: "Cranleigh Golf & Country Club",
-    providerCourseId: "intelligent-golf-cranleigh",
-    courseSlug: "cranleigh",
-    googleRating: null,
-    googleReviews: null,
-  },
+  // WORKING STRUCTURE COURSES (same pattern as your current ones)
+
+{
+  targetUrl: "https://members.cottesmoregolf.co.uk/visitorbooking/",
+  courseName: "Cottesmore Hotel Golf & Country Club",
+  providerCourseId: "intelligent-golf-cottesmore",
+  courseSlug: "cottesmore",
+  googleRating: 4.2,
+  googleReviews: 987,
+},
+{
+  targetUrl: "https://members.slinfoldgolf.co.uk/visitorbooking/",
+  courseName: "Slinfold Golf & Country Club",
+  providerCourseId: "intelligent-golf-slinfold",
+  courseSlug: "slinfold",
+  googleRating: 4.1,
+  googleReviews: 612,
+},
+{
+  targetUrl: "https://members.hamptongolf.co.uk/visitorbooking/",
+  courseName: "Hampton Court Palace Golf Club",
+  providerCourseId: "intelligent-golf-hampton",
+  courseSlug: "hampton-court",
+  googleRating: null,
+  googleReviews: null,
+}
 ];
 
 function ensureOutputDir() {
