@@ -22,13 +22,38 @@ const COURSES = [
     googleReviews: 987,
   },
   {
-    targetUrl:
-      "https://www.charthamparkgolfclub.com/visitorbooking/?_gl=1*d7dol7*_gcl_au*MTU1NzYyNzY4NS4xNzczMjQ4ODEw*_ga*MTM5ODU3MTQyOS4xNzczMjQ4ODA4*_ga_5SFCQVMKTR*czE3NzMyNDg4MDgkbzEkZzAkdDE3NzMyNDg4MDgkajYwJGwwJGgw",
+    targetUrl: "https://www.charthamparkgolfclub.com/visitorbooking/",
     courseName: "Chartham Park Golf & Country Club",
     providerCourseId: "intelligent-golf-chartham-park",
     courseSlug: "chartham-park",
     googleRating: 4.1,
     googleReviews: 612,
+  },
+
+  // NEW SURREY COURSES — same Intelligent Golf family
+  {
+    targetUrl: "https://drift.intelligentgolf.co.uk/",
+    courseName: "Drift Golf Club",
+    providerCourseId: "intelligent-golf-drift",
+    courseSlug: "drift",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://milford.intelligentgolf.co.uk/",
+    courseName: "Milford Golf Club",
+    providerCourseId: "intelligent-golf-milford",
+    courseSlug: "milford",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://cranleigh.intelligentgolf.co.uk/",
+    courseName: "Cranleigh Golf & Country Club",
+    providerCourseId: "intelligent-golf-cranleigh",
+    courseSlug: "cranleigh",
+    googleRating: null,
+    googleReviews: null,
   },
 ];
 
