@@ -29,8 +29,6 @@ const COURSES = [
     googleRating: 4.1,
     googleReviews: 612,
   },
-
-  // NEW VERIFIED COURSES
   {
     targetUrl: "https://www.theleatherheadclub.com/visitorbooking/",
     courseName: "The Leatherhead Club",
@@ -52,6 +50,48 @@ const COURSES = [
     courseName: "Addington Court",
     providerCourseId: "intelligent-golf-addington-court",
     courseSlug: "addington-court",
+    googleRating: null,
+    googleReviews: null,
+  },
+
+  // NEW VERIFIED COURSES
+  {
+    targetUrl: "https://www.ifieldgolf.com/visitorbooking/",
+    courseName: "Ifield Golf Club",
+    providerCourseId: "intelligent-golf-ifield",
+    courseSlug: "ifield",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://www.hammanor.co.uk/visitorbooking/",
+    courseName: "Ham Manor Golf Club",
+    providerCourseId: "intelligent-golf-ham-manor",
+    courseSlug: "ham-manor",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://horsham.intelligentgolf.co.uk/visitorbooking/",
+    courseName: "Horsham Golf & Fitness",
+    providerCourseId: "intelligent-golf-horsham",
+    courseSlug: "horsham",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://bognorregis.hub.clubv1.com/Visitors/TeeSheet?date=2026-03-19",
+    courseName: "Bognor Regis Golf Club",
+    providerCourseId: "clubv1-bognor-regis",
+    courseSlug: "bognor-regis",
+    googleRating: null,
+    googleReviews: null,
+  },
+  {
+    targetUrl: "https://hornepark.intelligentgolf.co.uk/visitorbooking/",
+    courseName: "Horne Park Golf Club",
+    providerCourseId: "intelligent-golf-horne-park",
+    courseSlug: "horne-park",
     googleRating: null,
     googleReviews: null,
   },
@@ -100,6 +140,11 @@ function extractSlotDateFromBody(bodyText) {
   return `${year}-${month}-${day}`;
 }
 
+function extractDateFromUrl(targetUrl) {
+  const match = String(targetUrl || "").match(/[?&]date=(\d{4}-\d{2}-\d{2})/i);
+  return match ? match[1] : null;
+}
+
 function normalisePrice(priceText) {
   const cleaned = String(priceText || "").replace(/[^\d.]/g, "");
   const value = Number(cleaned);
@@ -114,6 +159,55 @@ async function tryAcceptCookies(page) {
   await page.click("text=ACCEPT COOKIES").catch(() => {});
   await page.click("text=Accept Cookies").catch(() => {});
   await page.click("text=Accept cookies").catch(() => {});
+}
+
+function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate) {
+  const extractedRows = [];
+
+  for (const row of anchorRows) {
+    const match = String(row.text || "").match(/(\d{1,2}:\d{2})\s*£\s*([0-9]+(?:\.[0-9]{2})?)/i);
+
+    if (!match) {
+      continue;
+    }
+
+    const slotTime = match[1];
+    const price = normalisePrice(match[2]);
+
+    const bookingUrl = row.href
+      ? new URL(row.href, finalUrl).toString()
+      : finalUrl;
+
+    extractedRows.push({
+      external_id: buildExternalId(
+        courseConfig.courseSlug,
+        slotDate,
+        slotTime,
+        price,
+      ),
+      provider_course_id: courseConfig.providerCourseId,
+      course_name: courseConfig.courseName,
+      slot_date: slotDate,
+      slot_time: slotTime,
+      price,
+      players: 4,
+      booking_url: bookingUrl,
+      google_rating: courseConfig.googleRating,
+      google_reviews: courseConfig.googleReviews,
+      raw_payload: {
+        source: "visitor_booking_page",
+        club: courseConfig.courseName,
+        target_url: courseConfig.targetUrl,
+        final_url: finalUrl,
+        title,
+        link_text: row.text,
+      },
+    });
+  }
+
+  return Array.from(
+    new Map(extractedRows.map((row) => [row.external_id, row])).values(),
+  );
 }
 
 async function scrapeCourse(browser, courseConfig) {
@@ -137,7 +231,12 @@ async function scrapeCourse(browser, courseConfig) {
 
   const bodyText = await page.locator("body").innerText().catch(() => "");
   const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 3000);
-  const slotDate = extractSlotDateFromBody(bodyText);
+
+  let slotDate = extractSlotDateFromBody(bodyText);
+
+  if (!slotDate) {
+    slotDate = extractDateFromUrl(courseConfig.targetUrl);
+  }
 
   const screenshotPath = path.join(
     OUTPUT_DIR,
@@ -149,88 +248,16 @@ async function scrapeCourse(browser, courseConfig) {
     fullPage: true,
   });
 
-  if (!slotDate) {
-    const info = {
-      targetUrl: courseConfig.targetUrl,
-      finalUrl,
-      title,
-      courseName: courseConfig.courseName,
-      providerCourseId: courseConfig.providerCourseId,
-      slotDate: null,
-      extractedCount: 0,
-      bodyPreview,
-      note: "Could not detect slot date from page body",
-    };
+  const anchorRows = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("a")).map((a) => ({
+      text: (a.innerText || "").replace(/\s+/g, " ").trim(),
+      href: a.getAttribute("href"),
+    }));
+  });
 
-    fs.writeFileSync(
-      path.join(OUTPUT_DIR, `${courseConfig.courseSlug}-page-info.json`),
-      JSON.stringify(info, null, 2),
-    );
-
-    console.log(
-      `[${courseConfig.courseName}] No slot date detected from page body. Exiting cleanly for this course.`,
-    );
-
-    await page.close();
-
-    return {
-      ok: true,
-      course: courseConfig.courseName,
-      extractedRows: [],
-      info,
-    };
-  }
-
-  const linkHandles = await page.locator("a").elementHandles();
-  const extractedRows = [];
-
-  for (const linkHandle of linkHandles) {
-    const text = (await linkHandle.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-    const href = await linkHandle.getAttribute("href").catch(() => null);
-
-    const match = text.match(/(\d{1,2}:\d{2})\s*£\s*([0-9]+(?:\.[0-9]{2})?)/i);
-
-    if (!match) {
-      continue;
-    }
-
-    const slotTime = match[1];
-    const price = normalisePrice(match[2]);
-
-    const bookingUrl = href
-      ? new URL(href, finalUrl).toString()
-      : finalUrl;
-
-    extractedRows.push({
-      external_id: buildExternalId(
-        courseConfig.courseSlug,
-        slotDate,
-        slotTime,
-        price,
-      ),
-      provider_course_id: courseConfig.providerCourseId,
-      course_name: courseConfig.courseName,
-      slot_date: slotDate,
-      slot_time: slotTime,
-      price,
-      players: 4,
-      booking_url: bookingUrl,
-      google_rating: courseConfig.googleRating,
-      google_reviews: courseConfig.googleReviews,
-      raw_payload: {
-        source: "intelligent_golf",
-        club: courseConfig.courseName,
-        target_url: courseConfig.targetUrl,
-        final_url: finalUrl,
-        title,
-        link_text: text,
-      },
-    });
-  }
-
-  const dedupedRows = Array.from(
-    new Map(extractedRows.map((row) => [row.external_id, row])).values(),
-  );
+  const extractedRows = slotDate
+    ? extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate)
+    : [];
 
   const info = {
     targetUrl: courseConfig.targetUrl,
@@ -238,16 +265,23 @@ async function scrapeCourse(browser, courseConfig) {
     title,
     courseName: courseConfig.courseName,
     providerCourseId: courseConfig.providerCourseId,
-    slotDate,
-    extractedCount: dedupedRows.length,
-    extractedPreview: dedupedRows.slice(0, 10),
+    slotDate: slotDate || null,
+    extractedCount: extractedRows.length,
+    extractedPreview: extractedRows.slice(0, 10),
     bodyPreview,
+    note: !slotDate ? "Could not detect slot date from page body or URL" : null,
   };
 
   fs.writeFileSync(
     path.join(OUTPUT_DIR, `${courseConfig.courseSlug}-page-info.json`),
     JSON.stringify(info, null, 2),
   );
+
+  if (!slotDate) {
+    console.log(
+      `[${courseConfig.courseName}] No slot date detected from page body or URL. Exiting cleanly for this course.`,
+    );
+  }
 
   console.log(`[${courseConfig.courseName}] PAGE INFO:`);
   console.log(JSON.stringify(info, null, 2));
@@ -257,7 +291,7 @@ async function scrapeCourse(browser, courseConfig) {
   return {
     ok: true,
     course: courseConfig.courseName,
-    extractedRows: dedupedRows,
+    extractedRows,
     info,
   };
 }
