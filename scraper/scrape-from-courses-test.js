@@ -18,6 +18,10 @@ function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function monthNameToNumber(monthName) {
   const months = {
     january: "01",
@@ -38,7 +42,7 @@ function monthNameToNumber(monthName) {
 }
 
 function extractSlotDateFromBody(bodyText) {
-  const match = bodyText.match(
+  const match = String(bodyText || "").match(
     /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Fri|Sat|Sun),?\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\b/i
   );
 
@@ -158,7 +162,7 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
       google_rating: courseConfig.googleRating,
       google_reviews: courseConfig.googleReviews,
       raw_payload: {
-        source: "courses_table_test_scraper",
+        source: "courses_table_test_scraper_anchor",
         provider: courseConfig.provider,
         club: courseConfig.courseName,
         target_url: courseConfig.targetUrl,
@@ -171,6 +175,60 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
 
   return Array.from(
     new Map(extractedRows.map((row) => [row.external_id, row])).values()
+  );
+}
+
+function extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title) {
+  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+
+  const priceMatch = text.match(/TEE TIMES FROM\s*£\s*([0-9]+(?:\.[0-9]{2})?)/i);
+  const price = priceMatch ? normalisePrice(priceMatch[1]) : null;
+
+  if (!price) {
+    return [];
+  }
+
+  const afterPrice = text.split(priceMatch[0])[1] || "";
+
+  const timeMatches = Array.from(
+    afterPrice.matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b/g)
+  );
+
+  const slotDate = todayIsoDate();
+
+  const rows = timeMatches.map((match) => {
+    const slotTime = `${match[1].padStart(2, "0")}:${match[2]}`;
+
+    return {
+      external_id: buildExternalId(
+        courseConfig.courseSlug,
+        slotDate,
+        slotTime,
+        price
+      ),
+      provider_course_id: courseConfig.providerCourseId,
+      course_name: courseConfig.courseName,
+      slot_date: slotDate,
+      slot_time: slotTime,
+      price,
+      players: 4,
+      booking_url: finalUrl,
+      google_rating: courseConfig.googleRating,
+      google_reviews: courseConfig.googleReviews,
+      raw_payload: {
+        source: "courses_table_test_scraper_brs_body",
+        provider: courseConfig.provider,
+        club: courseConfig.courseName,
+        target_url: courseConfig.targetUrl,
+        final_url: finalUrl,
+        title,
+        price_text: priceMatch[0],
+      },
+    };
+  });
+
+  return Array.from(
+    new Map(rows.map((row) => [row.external_id, row])).values()
   );
 }
 
@@ -202,7 +260,9 @@ async function scrapeCourse(browser, courseConfig) {
     slotDate = extractDateFromUrl(courseConfig.targetUrl);
   }
 
-  const safeSlug = courseConfig.courseSlug || courseConfig.courseName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const safeSlug =
+    courseConfig.courseSlug ||
+    courseConfig.courseName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
   await page.screenshot({
     path: path.join(OUTPUT_DIR, `${safeSlug}-test.png`),
@@ -216,9 +276,24 @@ async function scrapeCourse(browser, courseConfig) {
     }));
   });
 
-  const extractedRows = slotDate
-    ? extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate)
-    : [];
+  let extractedRows = [];
+
+  if (courseConfig.provider === "brs") {
+    extractedRows = extractRowsFromBrsBody(
+      bodyText,
+      courseConfig,
+      finalUrl,
+      title
+    );
+  } else if (slotDate) {
+    extractedRows = extractRowsFromAnchors(
+      anchorRows,
+      courseConfig,
+      finalUrl,
+      title,
+      slotDate
+    );
+  }
 
   const info = {
     courseName: courseConfig.courseName,
@@ -226,11 +301,14 @@ async function scrapeCourse(browser, courseConfig) {
     targetUrl: courseConfig.targetUrl,
     finalUrl,
     title,
-    slotDate: slotDate || null,
+    slotDate: slotDate || (courseConfig.provider === "brs" ? todayIsoDate() : null),
     extractedCount: extractedRows.length,
     extractedPreview: extractedRows.slice(0, 10),
     bodyPreview,
-    note: !slotDate ? "Could not detect slot date from page body or URL" : null,
+    note:
+      !slotDate && courseConfig.provider !== "brs"
+        ? "Could not detect slot date from page body or URL"
+        : null,
   };
 
   fs.writeFileSync(
