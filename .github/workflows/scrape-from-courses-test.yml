@@ -1,0 +1,48 @@
+name: Scrape From Courses Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: "Comma-separated providers to test"
+        required: false
+        default: "intelligent_golf"
+      max_courses:
+        description: "Maximum courses to test"
+        required: false
+        default: "5"
+
+jobs:
+  scrape-test:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TEST_PROVIDERS: ${{ github.event.inputs.providers }}
+      MAX_COURSES: ${{ github.event.inputs.max_courses }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run test scraper
+        run: node scraper/scrape-from-courses-test.js
+
+      - name: Upload test scraper output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scraper-output-test
+          path: scraper-output-test
