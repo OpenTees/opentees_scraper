@@ -32,7 +32,7 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm install
+        run: npm install playwright
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
