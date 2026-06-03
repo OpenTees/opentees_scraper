@@ -1,0 +1,27 @@
+name: GolfNow API Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  golfnow-api-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run GolfNow API test
+        run: node scraper/golfnow-api-test.js
+
+      - name: Upload GolfNow API test output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golfnow-api-test-output
+          path: golfnow-api-test-output
