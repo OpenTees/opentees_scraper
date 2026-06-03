@@ -4,22 +4,16 @@ const path = require("path");
 const OUTPUT_DIR = path.join(process.cwd(), "golfnow-import-output");
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
-const COURSE = {
-  courseName: "Westerham Golf Club",
-  providerCourseId: "golfnow-westerham",
-  courseSlug: "westerham",
-  facilityId: 13846,
-  latitude: 51.270683,
-  longitude: 0.09694,
-};
+const PROVIDER = "golfnow";
 
 function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-function todayGolfNowDate() {
+function tomorrowGolfNowDate() {
   const date = new Date();
   date.setDate(date.getDate() + 1);
 
@@ -31,7 +25,66 @@ function todayGolfNowDate() {
   });
 }
 
-function buildPayload() {
+function extractFacilityId(targetUrl) {
+  const match = String(targetUrl || "").match(/facility\/(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function normalisePrice(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+async function fetchCoursesFromSupabase() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  }
+
+  const url =
+    `${SUPABASE_URL}/rest/v1/courses` +
+    `?select=course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled,scrape_enabled` +
+    `&provider=eq.${PROVIDER}` +
+    `&scrape_enabled=eq.true` +
+    `&target_url=not.is.null` +
+    `&order=course_name.asc`;
+
+  const response = await fetch(url, {
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Supabase fetch failed: ${response.status} ${text}`);
+  }
+
+  const rows = JSON.parse(text);
+
+  return rows
+    .map((course) => {
+      const facilityId = extractFacilityId(course.target_url);
+
+      return {
+        targetUrl: course.target_url,
+        courseName: course.course_name,
+        providerCourseId: course.provider_course_id,
+        courseSlug: course.course_slug,
+        googleRating: course.google_rating,
+        googleReviews: course.google_reviews,
+        provider: course.provider,
+        enabled: course.enabled,
+        scrapeEnabled: course.scrape_enabled,
+        facilityId,
+      };
+    })
+    .filter((course) => Number.isFinite(course.facilityId));
+}
+
+function buildPayload(course) {
   return {
     useWidgetNextAvailableDays: null,
     nextAvailableTeeTime: null,
@@ -40,7 +93,7 @@ function buildPayload() {
     pageSize: 30,
     teeTimeCount: 20,
     pageNumber: 0,
-    date: todayGolfNowDate(),
+    date: tomorrowGolfNowDate(),
     sortBy: "Date",
     sortByRollup: "Date.MinDate",
     sortDirection: "Asc",
@@ -56,11 +109,11 @@ function buildPayload() {
     timeMax: 42,
     holes: "Any",
     facilityType: "GolfCourse",
-    latitude: COURSE.latitude,
-    longitude: COURSE.longitude,
+    latitude: null,
+    longitude: null,
     radius: 35,
     maxAllowedRadius: null,
-    facilityId: COURSE.facilityId,
+    facilityId: course.facilityId,
     facilityIds: [],
     marketId: null,
     marketName: null,
@@ -82,12 +135,7 @@ function buildPayload() {
   };
 }
 
-function normalisePrice(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.round(number) : null;
-}
-
-function mapTeeTimes(json) {
+function mapTeeTimes(json, course) {
   const teeTimes = json?.ttResults?.teeTimes || [];
 
   return teeTimes
@@ -115,29 +163,37 @@ function mapTeeTimes(json) {
 
       const bookingUrl = detailUrl
         ? `https://www.golfnow.co.uk${detailUrl}`
-        : `https://www.golfnow.co.uk/tee-times/facility/${COURSE.facilityId}`;
+        : `https://www.golfnow.co.uk/tee-times/facility/${course.facilityId}`;
 
       return {
-        external_id: `golfnow-${COURSE.facilityId}-${teeTimeRateId || `${slotDate}-${slotTime}`}`,
-        provider_course_id: COURSE.providerCourseId,
-        course_name: COURSE.courseName,
+        external_id: `golfnow-${course.facilityId}-${teeTimeRateId || `${slotDate}-${slotTime}`}`,
+        provider_course_id: course.providerCourseId,
+        course_name: course.courseName,
         slot_date: slotDate,
         slot_time: slotTime,
         price,
         players: 4,
         booking_url: bookingUrl,
+        google_rating: course.googleRating,
+        google_reviews: course.googleReviews,
         raw_payload: {
           source: "golfnow_import",
-          facility_id: COURSE.facilityId,
+          facility_id: course.facilityId,
           tee_time_rate_id: teeTimeRateId,
           detail_url: detailUrl,
+          provider: course.provider,
+          target_url: course.targetUrl,
         },
       };
     })
     .filter((row) => row.slot_date && row.slot_time && row.booking_url);
 }
 
-async function fetchGolfNowRows() {
+async function fetchGolfNowRowsForCourse(course) {
+  const referer = course.targetUrl.includes("golfnow.")
+    ? course.targetUrl
+    : `https://www.golfnow.co.uk/tee-times/facility/${course.facilityId}/search`;
+
   const response = await fetch(
     "https://www.golfnow.co.uk/api/tee-times/tee-time-search-results",
     {
@@ -146,29 +202,32 @@ async function fetchGolfNowRows() {
         "Content-Type": "application/json",
         Accept: "application/json",
         Origin: "https://www.golfnow.co.uk",
-        Referer: "https://www.golfnow.co.uk/tee-times/facility/13846-westerham-golf-club/search",
+        Referer: referer,
         "User-Agent": "Mozilla/5.0",
       },
-      body: JSON.stringify(buildPayload()),
+      body: JSON.stringify(buildPayload(course)),
     }
   );
 
   const text = await response.text();
 
-  console.log("GOLFNOW STATUS:", response.status);
-  console.log("GOLFNOW BODY PREVIEW:", text.slice(0, 500));
+  console.log(`[${course.courseName}] GOLFNOW STATUS:`, response.status);
+  console.log(`[${course.courseName}] BODY PREVIEW:`, text.slice(0, 300));
 
-  fs.writeFileSync(path.join(OUTPUT_DIR, "raw-response.json"), text);
+  fs.writeFileSync(
+    path.join(OUTPUT_DIR, `${course.courseSlug || course.facilityId}-raw-response.json`),
+    text
+  );
 
   if (!response.ok) {
-    throw new Error(`GolfNow request failed: ${response.status}`);
+    throw new Error(`GolfNow request failed for ${course.courseName}: ${response.status}`);
   }
 
   const json = JSON.parse(text);
-  const rows = mapTeeTimes(json);
+  const rows = mapTeeTimes(json, course);
 
   fs.writeFileSync(
-    path.join(OUTPUT_DIR, "rows-to-import.json"),
+    path.join(OUTPUT_DIR, `${course.courseSlug || course.facilityId}-mapped-rows.json`),
     JSON.stringify(rows, null, 2)
   );
 
@@ -228,19 +287,65 @@ async function importRows(rows) {
 async function run() {
   ensureOutputDir();
 
-  console.log("MODE: GOLFNOW_IMPORT_LIMITED_WESTERHAM");
-  console.log("COURSE:", COURSE);
+  const courses = await fetchCoursesFromSupabase();
 
-  const rows = await fetchGolfNowRows();
-  const importResult = await importRows(rows);
+  console.log("MODE: GOLFNOW_IMPORT_DATABASE_DRIVEN");
+  console.log("PROVIDER:", PROVIDER);
+  console.log("SCRAPE_ENABLED_ONLY: true");
+  console.log("COURSES LOADED:", courses.length);
+  console.log(JSON.stringify(courses, null, 2));
+
+  const allRows = [];
+  const courseResults = [];
+
+  for (const course of courses) {
+    try {
+      const rows = await fetchGolfNowRowsForCourse(course);
+
+      allRows.push(...rows);
+
+      courseResults.push({
+        course: course.courseName,
+        facilityId: course.facilityId,
+        ok: true,
+        extractedCount: rows.length,
+        error: null,
+      });
+    } catch (error) {
+      console.error(`[${course.courseName}] GOLFNOW ERROR:`, error);
+
+      courseResults.push({
+        course: course.courseName,
+        facilityId: course.facilityId,
+        ok: false,
+        extractedCount: 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const uniqueRows = Array.from(
+    new Map(allRows.map((row) => [row.external_id, row])).values()
+  );
+
+  fs.writeFileSync(
+    path.join(OUTPUT_DIR, "rows-to-import.json"),
+    JSON.stringify(uniqueRows, null, 2)
+  );
+
+  const importResult = await importRows(uniqueRows);
 
   const summary = {
-    mode: "GOLFNOW_IMPORT_LIMITED_WESTERHAM",
-    course: COURSE.courseName,
-    facilityId: COURSE.facilityId,
-    rowsExtracted: rows.length,
-    rowsSentToImporter: rows.length,
+    mode: "GOLFNOW_IMPORT_DATABASE_DRIVEN",
+    provider: PROVIDER,
+    scrapeEnabledOnly: true,
+    totalCourses: courses.length,
+    successfulCourses: courseResults.filter((r) => r.ok).length,
+    failedCourses: courseResults.filter((r) => !r.ok).length,
+    totalRowsExtracted: allRows.length,
+    totalUniqueRowsImported: uniqueRows.length,
     importResult,
+    courses: courseResults,
   };
 
   fs.writeFileSync(
