@@ -311,10 +311,12 @@ async function scrapeCourse(browser, courseConfig) {
     courseConfig.courseSlug ||
     courseConfig.courseName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
+  if (courseConfig.provider !== "clubv1") {
   await page.screenshot({
     path: path.join(OUTPUT_DIR, `${safeSlug}-test.png`),
     fullPage: false,
   });
+}
 
   const anchorRows = await page.evaluate(() => {
     return Array.from(document.querySelectorAll("a")).map((a) => ({
