@@ -11,6 +11,14 @@ const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 const ALLOWED_COURSES = [
   "Banstead Downs Golf Club",
   "Boars Head Golf Centre",
+  "Highwoods Golf Club",
+  "Lewes Golf Club",
+  "Lindfield Golf Club",
+  "Lydd Golf Club",
+  "Pyecombe Golf Club",
+  "Seaford Head Golf Course",
+  "Silvermere Golf Complex",
+  "West Hove Golf Club"
 ];
 
 const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
