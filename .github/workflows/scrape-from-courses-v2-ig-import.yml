@@ -2,6 +2,9 @@ name: Scrape From Courses V2 IG Import
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '25 7 * * *'
+    - cron: '25 13 * * *'
 
 jobs:
   scrape-v2-ig-import:
