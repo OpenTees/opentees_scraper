@@ -1,0 +1,39 @@
+name: Scrape From Courses V2 Import
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape-v2-import:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      MANUAL_IMPORT_SECRET: ${{ secrets.MANUAL_IMPORT_SECRET }}
+      COURSE_TIMEOUT_MS: "45000"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install playwright
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run V2 import scraper
+        run: node scraper/scrape-from-courses-v2-import.js
+
+      - name: Upload V2 import output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scraper-output-v2-import
+          path: scraper-output-v2-import
