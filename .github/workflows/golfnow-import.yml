@@ -8,8 +8,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      MANUAL_IMPORT_SECRET: ${{ secrets.MANUAL_IMPORT_SECRET }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  MANUAL_IMPORT_SECRET: ${{ secrets.MANUAL_IMPORT_SECRET }}
 
     steps:
       - name: Checkout repository
