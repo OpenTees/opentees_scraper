@@ -18,8 +18,8 @@ const ALLOWED_COURSES = [
   "Pyecombe Golf Club",
   "Seaford Head Golf Course",
   "Silvermere Golf Complex",
-  "West Hove Golf Club"
-  "Hever Castle Golf Club"
+  "West Hove Golf Club",
+  "Hever Castle Golf Club",
   "Tilgate Forest Golf Centre"
 ];
 
