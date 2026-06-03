@@ -41,6 +41,29 @@ function monthNameToNumber(monthName) {
   return months[String(monthName || "").toLowerCase()] || null;
 }
 
+function extractDateFromUrl(targetUrl) {
+  const match = String(targetUrl || "").match(/[?&]date=(\d{4}-\d{2}-\d{2})/i);
+  return match ? match[1] : null;
+}
+
+function extractDateFromClubV1Body(bodyText) {
+  const text = String(bodyText || "");
+
+  const match = text.match(
+    /\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})\b/i
+  );
+
+  if (!match) return null;
+
+  const day = String(match[1]).padStart(2, "0");
+  const month = monthNameToNumber(match[2]);
+  const year = match[3];
+
+  if (!month) return null;
+
+  return `${year}-${month}-${day}`;
+}
+
 function extractSlotDateFromBody(bodyText) {
   const match = String(bodyText || "").match(
     /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Fri|Sat|Sun),?\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\b/i
@@ -55,11 +78,6 @@ function extractSlotDateFromBody(bodyText) {
   if (!month) return null;
 
   return `${year}-${month}-${day}`;
-}
-
-function extractDateFromUrl(targetUrl) {
-  const match = String(targetUrl || "").match(/[?&]date=(\d{4}-\d{2}-\d{2})/i);
-  return match ? match[1] : null;
 }
 
 function normalisePrice(priceText) {
@@ -85,6 +103,8 @@ async function tryAcceptCookies(page) {
   await page.click("text=ACCEPT COOKIES").catch(() => {});
   await page.click("text=Accept Cookies").catch(() => {});
   await page.click("text=Accept cookies").catch(() => {});
+  await page.click("text=I Accept").catch(() => {});
+  await page.click("text=Accept All").catch(() => {});
 }
 
 async function fetchCoursesFromSupabase() {
@@ -146,12 +166,7 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
     const bookingUrl = row.href ? new URL(row.href, finalUrl).toString() : finalUrl;
 
     extractedRows.push({
-      external_id: buildExternalId(
-        courseConfig.courseSlug,
-        slotDate,
-        slotTime,
-        price
-      ),
+      external_id: buildExternalId(courseConfig.courseSlug, slotDate, slotTime, price),
       provider_course_id: courseConfig.providerCourseId,
       course_name: courseConfig.courseName,
       slot_date: slotDate,
@@ -173,9 +188,7 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
     });
   }
 
-  return Array.from(
-    new Map(extractedRows.map((row) => [row.external_id, row])).values()
-  );
+  return Array.from(new Map(extractedRows.map((row) => [row.external_id, row])).values());
 }
 
 function extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title) {
@@ -184,9 +197,7 @@ function extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title) {
   const priceMatch = text.match(/TEE TIMES FROM\s*£\s*([0-9]+(?:\.[0-9]{2})?)/i);
   const price = priceMatch ? normalisePrice(priceMatch[1]) : null;
 
-  if (!price) {
-    return [];
-  }
+  if (!price) return [];
 
   const afterPrice = text.split(priceMatch[0])[1] || "";
 
@@ -200,12 +211,7 @@ function extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title) {
     const slotTime = `${match[1].padStart(2, "0")}:${match[2]}`;
 
     return {
-      external_id: buildExternalId(
-        courseConfig.courseSlug,
-        slotDate,
-        slotTime,
-        price
-      ),
+      external_id: buildExternalId(courseConfig.courseSlug, slotDate, slotTime, price),
       provider_course_id: courseConfig.providerCourseId,
       course_name: courseConfig.courseName,
       slot_date: slotDate,
@@ -227,9 +233,51 @@ function extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title) {
     };
   });
 
-  return Array.from(
-    new Map(rows.map((row) => [row.external_id, row])).values()
-  );
+  return Array.from(new Map(rows.map((row) => [row.external_id, row])).values());
+}
+
+function extractRowsFromClubV1Body(bodyText, courseConfig, finalUrl, title) {
+  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+
+  const slotDate =
+    extractDateFromUrl(finalUrl) ||
+    extractDateFromClubV1Body(text) ||
+    todayIsoDate();
+
+  const rowRegex =
+    /\b([01]?\d|2[0-3]):([0-5]\d)\s+([0-9]+(?:\.[0-9]{2})?)\s+[0-9]+(?:\.[0-9]{2})?\s+[0-9]+(?:\.[0-9]{2})?\s+[0-9]+(?:\.[0-9]{2})?\s+Book\b/g;
+
+  const rows = [];
+
+  for (const match of text.matchAll(rowRegex)) {
+    const slotTime = `${match[1].padStart(2, "0")}:${match[2]}`;
+    const price = normalisePrice(match[3]);
+
+    if (!price) continue;
+
+    rows.push({
+      external_id: buildExternalId(courseConfig.courseSlug, slotDate, slotTime, price),
+      provider_course_id: courseConfig.providerCourseId,
+      course_name: courseConfig.courseName,
+      slot_date: slotDate,
+      slot_time: slotTime,
+      price,
+      players: 4,
+      booking_url: finalUrl,
+      google_rating: courseConfig.googleRating,
+      google_reviews: courseConfig.googleReviews,
+      raw_payload: {
+        source: "courses_table_test_scraper_clubv1_body",
+        provider: courseConfig.provider,
+        club: courseConfig.courseName,
+        target_url: courseConfig.targetUrl,
+        final_url: finalUrl,
+        title,
+      },
+    });
+  }
+
+  return Array.from(new Map(rows.map((row) => [row.external_id, row])).values());
 }
 
 async function scrapeCourse(browser, courseConfig) {
@@ -254,11 +302,10 @@ async function scrapeCourse(browser, courseConfig) {
   const bodyText = await page.locator("body").innerText().catch(() => "");
   const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 3000);
 
-  let slotDate = extractSlotDateFromBody(bodyText);
-
-  if (!slotDate) {
-    slotDate = extractDateFromUrl(courseConfig.targetUrl);
-  }
+  let slotDate =
+    extractSlotDateFromBody(bodyText) ||
+    extractDateFromUrl(finalUrl) ||
+    extractDateFromUrl(courseConfig.targetUrl);
 
   const safeSlug =
     courseConfig.courseSlug ||
@@ -279,12 +326,11 @@ async function scrapeCourse(browser, courseConfig) {
   let extractedRows = [];
 
   if (courseConfig.provider === "brs") {
-    extractedRows = extractRowsFromBrsBody(
-      bodyText,
-      courseConfig,
-      finalUrl,
-      title
-    );
+    extractedRows = extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title);
+    slotDate = todayIsoDate();
+  } else if (courseConfig.provider === "clubv1") {
+    extractedRows = extractRowsFromClubV1Body(bodyText, courseConfig, finalUrl, title);
+    slotDate = extractedRows[0]?.slot_date || slotDate || todayIsoDate();
   } else if (slotDate) {
     extractedRows = extractRowsFromAnchors(
       anchorRows,
@@ -301,12 +347,12 @@ async function scrapeCourse(browser, courseConfig) {
     targetUrl: courseConfig.targetUrl,
     finalUrl,
     title,
-    slotDate: slotDate || (courseConfig.provider === "brs" ? todayIsoDate() : null),
+    slotDate: slotDate || null,
     extractedCount: extractedRows.length,
     extractedPreview: extractedRows.slice(0, 10),
     bodyPreview,
     note:
-      !slotDate && courseConfig.provider !== "brs"
+      !slotDate && !["brs", "clubv1"].includes(courseConfig.provider)
         ? "Could not detect slot date from page body or URL"
         : null,
   };
