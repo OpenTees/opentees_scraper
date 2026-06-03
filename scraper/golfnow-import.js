@@ -21,6 +21,7 @@ function ensureOutputDir() {
 
 function todayGolfNowDate() {
   const date = new Date();
+  date.setDate(date.getDate() + 1);
 
   return date.toLocaleDateString("en-US", {
     month: "short",
