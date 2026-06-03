@@ -13,6 +13,8 @@ const TEST_PROVIDERS = (process.env.TEST_PROVIDERS || "intelligent_golf")
   .filter(Boolean);
 
 const MAX_COURSES = Number(process.env.MAX_COURSES || 5);
+const SAVE_SCREENSHOTS = process.env.SAVE_SCREENSHOTS === "true";
+const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
 
 function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -100,11 +102,12 @@ function buildExternalId(courseSlug, slotDate, slotTime, price) {
 }
 
 async function tryAcceptCookies(page) {
-  await page.click("text=ACCEPT COOKIES").catch(() => {});
-  await page.click("text=Accept Cookies").catch(() => {});
-  await page.click("text=Accept cookies").catch(() => {});
-  await page.click("text=I Accept").catch(() => {});
-  await page.click("text=Accept All").catch(() => {});
+  await page.click("text=ACCEPT COOKIES", { timeout: 1500 }).catch(() => {});
+  await page.click("text=Accept Cookies", { timeout: 1500 }).catch(() => {});
+  await page.click("text=Accept cookies", { timeout: 1500 }).catch(() => {});
+  await page.click("text=I Accept", { timeout: 1500 }).catch(() => {});
+  await page.click("text=Accept All", { timeout: 1500 }).catch(() => {});
+  await page.click("text=Reject All", { timeout: 1500 }).catch(() => {});
 }
 
 async function fetchCoursesFromSupabase() {
@@ -280,102 +283,123 @@ function extractRowsFromClubV1Body(bodyText, courseConfig, finalUrl, title) {
   return Array.from(new Map(rows.map((row) => [row.external_id, row])).values());
 }
 
-async function scrapeCourse(browser, courseConfig) {
+async function scrapeCourseInner(browser, courseConfig) {
   const page = await browser.newPage({
-    viewport: { width: 1440, height: 1200 },
+    viewport: { width: 1280, height: 900 },
   });
 
-  console.log(`Opening: ${courseConfig.courseName} — ${courseConfig.targetUrl}`);
+  page.setDefaultTimeout(10000);
+  page.setDefaultNavigationTimeout(30000);
 
-  await page.goto(courseConfig.targetUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: 90000,
-  });
+  try {
+    console.log(`Opening: ${courseConfig.courseName} — ${courseConfig.targetUrl}`);
 
-  await page.waitForTimeout(3000);
-  await tryAcceptCookies(page);
-  await page.waitForTimeout(courseConfig.provider === "clubv1" ? 2000 : 8000);
+    await page.goto(courseConfig.targetUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
 
-  const title = await page.title();
-  const finalUrl = page.url();
+    await page.waitForTimeout(1500);
+    await tryAcceptCookies(page);
+    await page.waitForTimeout(2500);
 
-  const bodyText = await page.locator("body").innerText().catch(() => "");
-  const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 3000);
+    const title = await page.title();
+    const finalUrl = page.url();
 
-  let slotDate =
-    extractSlotDateFromBody(bodyText) ||
-    extractDateFromUrl(finalUrl) ||
-    extractDateFromUrl(courseConfig.targetUrl);
+    const bodyText = await page.locator("body").innerText({ timeout: 10000 }).catch(() => "");
+    const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 2000);
 
-  const safeSlug =
-    courseConfig.courseSlug ||
-    courseConfig.courseName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    let slotDate =
+      extractSlotDateFromBody(bodyText) ||
+      extractDateFromUrl(finalUrl) ||
+      extractDateFromUrl(courseConfig.targetUrl);
 
-  if (courseConfig.provider !== "clubv1") {
-  await page.screenshot({
-    path: path.join(OUTPUT_DIR, `${safeSlug}-test.png`),
-    fullPage: false,
-  });
-}
+    const safeSlug =
+      courseConfig.courseSlug ||
+      courseConfig.courseName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
-  const anchorRows = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("a")).map((a) => ({
-      text: (a.innerText || "").replace(/\s+/g, " ").trim(),
-      href: a.getAttribute("href"),
-    }));
-  });
+    if (SAVE_SCREENSHOTS) {
+      await page.screenshot({
+        path: path.join(OUTPUT_DIR, `${safeSlug}-test.png`),
+        fullPage: false,
+        timeout: 10000,
+      }).catch((error) => {
+        console.warn(`[${courseConfig.courseName}] Screenshot skipped: ${error.message}`);
+      });
+    }
 
-  let extractedRows = [];
+    const anchorRows = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("a")).map((a) => ({
+        text: (a.innerText || "").replace(/\s+/g, " ").trim(),
+        href: a.getAttribute("href"),
+      }));
+    }).catch(() => []);
 
-  if (courseConfig.provider === "brs") {
-    extractedRows = extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title);
-    slotDate = todayIsoDate();
-  } else if (courseConfig.provider === "clubv1") {
-    extractedRows = extractRowsFromClubV1Body(bodyText, courseConfig, finalUrl, title);
-    slotDate = extractedRows[0]?.slot_date || slotDate || todayIsoDate();
-  } else if (slotDate) {
-    extractedRows = extractRowsFromAnchors(
-      anchorRows,
-      courseConfig,
+    let extractedRows = [];
+
+    if (courseConfig.provider === "brs") {
+      extractedRows = extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title);
+      slotDate = todayIsoDate();
+    } else if (courseConfig.provider === "clubv1") {
+      extractedRows = extractRowsFromClubV1Body(bodyText, courseConfig, finalUrl, title);
+      slotDate = extractedRows[0]?.slot_date || slotDate || todayIsoDate();
+    } else if (slotDate) {
+      extractedRows = extractRowsFromAnchors(
+        anchorRows,
+        courseConfig,
+        finalUrl,
+        title,
+        slotDate
+      );
+    }
+
+    const info = {
+      courseName: courseConfig.courseName,
+      provider: courseConfig.provider,
+      targetUrl: courseConfig.targetUrl,
       finalUrl,
       title,
-      slotDate
+      slotDate: slotDate || null,
+      extractedCount: extractedRows.length,
+      extractedPreview: extractedRows.slice(0, 10),
+      bodyPreview,
+      note:
+        !slotDate && !["brs", "clubv1"].includes(courseConfig.provider)
+          ? "Could not detect slot date from page body or URL"
+          : null,
+    };
+
+    fs.writeFileSync(
+      path.join(OUTPUT_DIR, `${safeSlug}-page-info.json`),
+      JSON.stringify(info, null, 2)
     );
+
+    console.log(`[${courseConfig.courseName}] TEST PAGE INFO:`);
+    console.log(JSON.stringify(info, null, 2));
+
+    return {
+      ok: true,
+      course: courseConfig.courseName,
+      provider: courseConfig.provider,
+      extractedRows,
+      info,
+    };
+  } finally {
+    await page.close().catch(() => {});
   }
+}
 
-  const info = {
-    courseName: courseConfig.courseName,
-    provider: courseConfig.provider,
-    targetUrl: courseConfig.targetUrl,
-    finalUrl,
-    title,
-    slotDate: slotDate || null,
-    extractedCount: extractedRows.length,
-    extractedPreview: extractedRows.slice(0, 10),
-    bodyPreview,
-    note:
-      !slotDate && !["brs", "clubv1"].includes(courseConfig.provider)
-        ? "Could not detect slot date from page body or URL"
-        : null,
-  };
+async function scrapeCourse(browser, courseConfig) {
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Course timeout after ${COURSE_TIMEOUT_MS}ms`));
+    }, COURSE_TIMEOUT_MS);
+  });
 
-  fs.writeFileSync(
-    path.join(OUTPUT_DIR, `${safeSlug}-page-info.json`),
-    JSON.stringify(info, null, 2)
-  );
-
-  console.log(`[${courseConfig.courseName}] TEST PAGE INFO:`);
-  console.log(JSON.stringify(info, null, 2));
-
-  await page.close();
-
-  return {
-    ok: true,
-    course: courseConfig.courseName,
-    provider: courseConfig.provider,
-    extractedRows,
-    info,
-  };
+  return Promise.race([
+    scrapeCourseInner(browser, courseConfig),
+    timeoutPromise,
+  ]);
 }
 
 async function run() {
@@ -385,6 +409,8 @@ async function run() {
 
   console.log("TEST PROVIDERS:", TEST_PROVIDERS);
   console.log("MAX COURSES:", MAX_COURSES);
+  console.log("SAVE_SCREENSHOTS:", SAVE_SCREENSHOTS);
+  console.log("COURSE_TIMEOUT_MS:", COURSE_TIMEOUT_MS);
   console.log("COURSES LOADED:", courses.length);
   console.log(JSON.stringify(courses, null, 2));
 
@@ -437,7 +463,7 @@ async function run() {
 
   fs.writeFileSync(
     path.join(OUTPUT_DIR, "extracted-rows-preview.json"),
-    JSON.stringify(allRows.slice(0, 50), null, 2)
+    JSON.stringify(allRows.slice(0, 100), null, 2)
   );
 
   console.log("TEST SCRAPE SUMMARY:");
