@@ -313,7 +313,7 @@ async function scrapeCourse(browser, courseConfig) {
 
   await page.screenshot({
     path: path.join(OUTPUT_DIR, `${safeSlug}-test.png`),
-    fullPage: true,
+    fullPage: false,
   });
 
   const anchorRows = await page.evaluate(() => {
