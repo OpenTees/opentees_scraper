@@ -294,7 +294,7 @@ async function scrapeCourse(browser, courseConfig) {
 
   await page.waitForTimeout(3000);
   await tryAcceptCookies(page);
-  await page.waitForTimeout(8000);
+  await page.waitForTimeout(courseConfig.provider === "clubv1" ? 2000 : 8000);
 
   const title = await page.title();
   const finalUrl = page.url();
