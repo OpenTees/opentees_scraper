@@ -1,0 +1,27 @@
+name: GolfNow Facility Finder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  golfnow-facility-finder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run GolfNow facility finder
+        run: node scraper/golfnow-facility-finder.js
+
+      - name: Upload GolfNow facility finder output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golfnow-facility-finder-output
+          path: golfnow-facility-finder-output
