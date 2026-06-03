@@ -18,9 +18,7 @@ const ALLOWED_COURSES = [
   "Pyecombe Golf Club",
   "Seaford Head Golf Course",
   "Silvermere Golf Complex",
-  "West Hove Golf Club",
-  "Hever Castle Golf Club",
-  "Tilgate Forest Golf Centre"
+  "West Hove Golf Club"
 ];
 
 const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
