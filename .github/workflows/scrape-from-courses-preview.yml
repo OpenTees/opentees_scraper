@@ -1,0 +1,50 @@
+name: Scrape From Courses Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: "Comma-separated providers to preview"
+        required: false
+        default: "brs,intelligent_golf"
+      max_courses:
+        description: "Maximum courses to preview"
+        required: false
+        default: "20"
+
+jobs:
+  scrape-preview:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TEST_PROVIDERS: ${{ github.event.inputs.providers }}
+      MAX_COURSES: ${{ github.event.inputs.max_courses }}
+      SAVE_SCREENSHOTS: "false"
+      COURSE_TIMEOUT_MS: "45000"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install playwright
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run preview scraper
+        run: node scraper/scrape-from-courses-preview.js
+
+      - name: Upload preview output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scraper-output-preview
+          path: scraper-output-preview
