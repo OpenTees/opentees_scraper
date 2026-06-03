@@ -8,10 +8,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
-const ALLOWED_COURSES = [
-  "Hever Castle Golf Club",
-  "Tilgate Forest Golf Centre"
-];
+const PROVIDER = "intelligent_golf";
 
 const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
 
@@ -91,15 +88,13 @@ async function fetchCoursesFromSupabase() {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   }
 
-  const courseFilter = ALLOWED_COURSES.map((name) => `"${name}"`).join(",");
-
   const url =
-    `${SUPABASE_URL}/rest/v1/courses` +
-    `?select=course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled` +
-    `&course_name=in.(${courseFilter})` +
-    `&provider=eq.intelligent_golf` +
-    `&target_url=not.is.null` +
-    `&order=course_name.asc`;
+  `${SUPABASE_URL}/rest/v1/courses` +
+  `?select=course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled,scrape_enabled` +
+  `&provider=eq.${PROVIDER}` +
+  `&scrape_enabled=eq.true` +
+  `&target_url=not.is.null` +
+  `&order=course_name.asc`;
 
   const response = await fetch(url, {
     headers: {
@@ -327,18 +322,11 @@ async function run() {
   const courses = await fetchCoursesFromSupabase();
 
   console.log("MODE: V2_IMPORT_LIMITED_INTELLIGENT_GOLF");
-  console.log("ALLOWED_COURSES:", ALLOWED_COURSES);
+  console.log("PROVIDER:", PROVIDER);
+  console.log("SCRAPE_ENABLED_ONLY: true");
   console.log("COURSE_TIMEOUT_MS:", COURSE_TIMEOUT_MS);
   console.log("COURSES LOADED:", courses.length);
   console.log(JSON.stringify(courses, null, 2));
-
-  const missingCourses = ALLOWED_COURSES.filter(
-    (name) => !courses.some((course) => course.courseName === name)
-  );
-
-  if (missingCourses.length) {
-    throw new Error(`Missing expected courses from Supabase: ${missingCourses.join(", ")}`);
-  }
 
   const browser = await chromium.launch({
     headless: true,
@@ -380,7 +368,8 @@ async function run() {
 
   const summary = {
     mode: "V2_IMPORT_LIMITED_INTELLIGENT_GOLF",
-    allowedCourses: ALLOWED_COURSES,
+    provider: PROVIDER,
+    scrapeEnabledOnly: true,
     totalCourses: courses.length,
     successfulCourses: courseResults.filter((r) => r.ok).length,
     failedCourses: courseResults.filter((r) => !r.ok).length,
