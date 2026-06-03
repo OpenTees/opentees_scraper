@@ -245,7 +245,7 @@ async function importRows(rows) {
   }
 
   const payload = {
-    source_key: "courses_v2_import",
+    source_key: "manual_import",
     rows,
   };
 
