@@ -252,9 +252,9 @@ async function importRows(rows) {
   }
 
   const payload = {
-    source_key: "manual_import",
-    rows,
-  };
+  source_key: "golfnow",
+  rows,
+};
 
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/ingest-tee-times`,
