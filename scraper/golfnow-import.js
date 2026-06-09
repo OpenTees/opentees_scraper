@@ -8,9 +8,20 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
 const PROVIDER = "golfnow";
+const IMPORT_CHUNK_SIZE = 100;
 
 function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
+
+function chunkArray(array, chunkSize) {
+  const chunks = [];
+
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+
+  return chunks;
 }
 
 function tomorrowGolfNowDate() {
@@ -144,7 +155,9 @@ function mapTeeTimes(json, course) {
       const dateTime = teeTime.time?.date || null;
 
       const slotDate = dateTime ? dateTime.slice(0, 10) : null;
-      const slotTime = dateTime ? dateTime.slice(11, 16) : teeTime.time?.formatted || null;
+      const slotTime = dateTime
+        ? dateTime.slice(11, 16)
+        : teeTime.time?.formatted || null;
 
       const price =
         normalisePrice(teeTime.displayRate?.value) ??
@@ -152,14 +165,9 @@ function mapTeeTimes(json, course) {
         normalisePrice(rate?.singlePlayerPrice?.greensFees?.value);
 
       const teeTimeRateId =
-        rate?.teeTimeRateId ||
-        teeTime.defaultTeeTimeRateId ||
-        null;
+        rate?.teeTimeRateId || teeTime.defaultTeeTimeRateId || null;
 
-      const detailUrl =
-        teeTime.detailUrl ||
-        rate?.detailUrl ||
-        null;
+      const detailUrl = teeTime.detailUrl || rate?.detailUrl || null;
 
       const bookingUrl = detailUrl
         ? `https://www.golfnow.co.uk${detailUrl}`
@@ -248,13 +256,14 @@ async function importRows(rows) {
     return {
       skipped: true,
       imported: 0,
+      responseText: null,
     };
   }
 
   const payload = {
-  source_key: "golfnow",
-  rows,
-};
+    source_key: PROVIDER,
+    rows,
+  };
 
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/ingest-tee-times`,
@@ -281,6 +290,62 @@ async function importRows(rows) {
     skipped: false,
     imported: rows.length,
     responseText,
+  };
+}
+
+async function importRowsInChunks(rows) {
+  if (!rows.length) {
+    console.log("No rows to import.");
+    return {
+      skipped: true,
+      imported: 0,
+      chunks: [],
+    };
+  }
+
+  const chunks = chunkArray(rows, IMPORT_CHUNK_SIZE);
+
+  console.log(
+    `IMPORTING ${rows.length} ROWS IN ${chunks.length} CHUNKS OF UP TO ${IMPORT_CHUNK_SIZE}`
+  );
+
+  let totalImported = 0;
+  const chunkResults = [];
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    const chunk = chunks[i];
+
+    console.log(`IMPORT CHUNK ${i + 1}/${chunks.length} (${chunk.length} rows)`);
+
+    try {
+      const result = await importRows(chunk);
+
+      totalImported += chunk.length;
+
+      chunkResults.push({
+        chunk: i + 1,
+        rows: chunk.length,
+        success: true,
+        responseText: result.responseText,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      console.error(`CHUNK ${i + 1} FAILED:`, message);
+
+      chunkResults.push({
+        chunk: i + 1,
+        rows: chunk.length,
+        success: false,
+        error: message,
+      });
+    }
+  }
+
+  return {
+    skipped: false,
+    imported: totalImported,
+    chunks: chunkResults,
   };
 }
 
@@ -333,17 +398,18 @@ async function run() {
     JSON.stringify(uniqueRows, null, 2)
   );
 
-  const importResult = await importRows(uniqueRows);
+  const importResult = await importRowsInChunks(uniqueRows);
 
   const summary = {
     mode: "GOLFNOW_IMPORT_DATABASE_DRIVEN",
     provider: PROVIDER,
     scrapeEnabledOnly: true,
+    importChunkSize: IMPORT_CHUNK_SIZE,
     totalCourses: courses.length,
     successfulCourses: courseResults.filter((r) => r.ok).length,
     failedCourses: courseResults.filter((r) => !r.ok).length,
     totalRowsExtracted: allRows.length,
-    totalUniqueRowsImported: uniqueRows.length,
+    totalUniqueRowsImported: importResult.imported,
     importResult,
     courses: courseResults,
   };
