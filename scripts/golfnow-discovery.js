@@ -49,22 +49,23 @@ page.on("response", async (res) => {
     responses.push(res);
   }
 });
+const tomorrow = new Date();
+tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const url =
-      `https://www.golfnow.co.uk/tee-times/search#qc=GeoLocation` +
-      `&location=${encodeURIComponent(node.node_name)}` +
-      `&facilitytype=0` +
-      `&sortby=Facilities.Distance.0` +
-      `&view=Course` +
-      `&holes=3` +
-      `&radius=${node.radius || 35}` +
-      `&timemax=42` +
-      `&timemin=10` +
-      `&players=0` +
-      `&pricemax=10000` +
-      `&pricemin=0` +
-      `&longitude=${node.longitude}` +
-      `&latitude=${node.latitude}`;
+const formattedDate = tomorrow.toLocaleDateString("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+    const searchUrl =
+  `https://www.golfnow.co.uk/tee-times/search` +
+  `#facilitytype=0` +
+  `&date=${encodeURIComponent(formattedDate)}` +
+  `&holes=3` +
+  `&longitude=${node.longitude}` +
+  `&latitude=${node.latitude}`;
+
+    console.log("Search URL:", searchUrl);
 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 await page.waitForTimeout(15000);
@@ -79,7 +80,14 @@ const response = responses[responses.length - 1];
 const json = await response.json();
     console.log("JSON top-level keys:", Object.keys(json));
 console.log("JSON preview:", JSON.stringify(json).slice(0, 2000));
-    const facilities = json?.ttResults?.facilities || [];
+    let facilities = json?.ttResults?.facilities || [];
+
+if (
+  facilities.length === 0 &&
+  json?.ttException?.nextAvailableFacilitySummary
+) {
+  facilities = [json.ttException.nextAvailableFacilitySummary];
+}
 
     console.log(`${node.node_name}: ${facilities.length} facilities`);
 
