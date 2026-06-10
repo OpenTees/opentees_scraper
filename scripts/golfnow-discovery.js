@@ -67,7 +67,7 @@ const formattedDate = tomorrow.toLocaleDateString("en-US", {
 
     console.log("Search URL:", searchUrl);
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
 await page.waitForTimeout(15000);
 
 if (responses.length === 0) {
