@@ -77,6 +77,8 @@ if (responses.length === 0) {
 
 const response = responses[responses.length - 1];
 const json = await response.json();
+    console.log("JSON top-level keys:", Object.keys(json));
+console.log("JSON preview:", JSON.stringify(json).slice(0, 2000));
     const facilities = json?.ttResults?.facilities || [];
 
     console.log(`${node.node_name}: ${facilities.length} facilities`);
