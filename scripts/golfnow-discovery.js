@@ -27,12 +27,25 @@ async function main() {
   for (const node of nodes || []) {
     console.log(`Discovering: ${node.node_name}`);
 
-    const responsePromise = page.waitForResponse(
-      (res) =>
-        res.url().includes("/api/tee-times/tee-time-search-results") &&
-        res.request().method() === "POST",
-      { timeout: 30000 }
-    );
+    const responses = [];
+
+page.on("response", async (res) => {
+  const url = res.url();
+
+  if (
+    url.includes("tee-time-search-results") ||
+    url.includes("tee-times")
+  ) {
+    console.log("Response:", res.status(), url);
+  }
+
+  if (
+    url.includes("tee-time-search-results") &&
+    res.request().method() === "POST"
+  ) {
+    responses.push(res);
+  }
+});
 
     const url =
       `https://www.golfnow.co.uk/tee-times/search#qc=GeoLocation` +
@@ -51,16 +64,16 @@ async function main() {
       `&latitude=${node.latitude}`;
 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+await page.waitForTimeout(15000);
 
-    let response;
-    try {
-      response = await responsePromise;
-    } catch {
-      console.log(`No API response for ${node.node_name}`);
-      continue;
-    }
+if (responses.length === 0) {
+  console.log(`No API response for ${node.node_name}`);
+  console.log("Current page:", page.url());
+  continue;
+}
 
-    const json = await response.json();
+const response = responses[responses.length - 1];
+const json = await response.json();
     const facilities = json?.ttResults?.facilities || [];
 
     console.log(`${node.node_name}: ${facilities.length} facilities`);
