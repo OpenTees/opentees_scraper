@@ -122,26 +122,33 @@ if (
 
   const filteredRows = allRows.filter((r) => r.number_of_tee_times >= 20);
 
-  if (filteredRows.length) {
-    const { error: upsertError } = await supabase
-      .from("golfnow_discovered_facilities")
-      .upsert(filteredRows, { onConflict: "provider_course_id" });
+const dedupedRows = Array.from(
+  new Map(
+    filteredRows.map((row) => [row.provider_course_id, row])
+  ).values()
+);
 
-    if (upsertError) throw upsertError;
-  }
+if (dedupedRows.length) {
+  const { error: upsertError } = await supabase
+    .from("golfnow_discovered_facilities")
+    .upsert(dedupedRows, { onConflict: "provider_course_id" });
 
-  console.log(`Saved ${filteredRows.length} discovered facilities`);
-  console.table(
-    filteredRows
-      .sort((a, b) => b.number_of_tee_times - a.number_of_tee_times)
-      .slice(0, 25)
-      .map((r) => ({
-        id: r.provider_course_id,
-        course: r.course_name,
-        county: r.county,
-        tee_times: r.number_of_tee_times,
-      }))
-  );
+  if (upsertError) throw upsertError;
+}
+
+ console.log(`Saved ${dedupedRows.length} discovered facilities`);
+
+console.table(
+  dedupedRows
+    .sort((a, b) => b.number_of_tee_times - a.number_of_tee_times)
+    .slice(0, 25)
+    .map((r) => ({
+      id: r.provider_course_id,
+      course: r.course_name,
+      county: r.county,
+      tee_times: r.number_of_tee_times,
+    }))
+);
 }
 
 main().catch((err) => {
