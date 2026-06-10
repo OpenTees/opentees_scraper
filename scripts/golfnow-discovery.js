@@ -33,14 +33,17 @@ page.on("response", async (res) => {
   const url = res.url();
 
   if (
-    url.includes("tee-time-search-results") ||
-    url.includes("tee-times")
-  ) {
-    console.log("Response:", res.status(), url);
-  }
+  url.includes("courses-near-me") ||
+  url.includes("tee-time-search-results")
+) 
+  {
+
+  console.log("Response:", res.status(), url);
+
+}
 
   if (
-    url.includes("tee-time-search-results") &&
+    url.includes("courses-near-me") &&
     res.request().method() === "POST"
   ) {
     responses.push(res);
