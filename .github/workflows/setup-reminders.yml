@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       test_email:
-        description: "Optional test email"
+        description: "Send to a specific email"
         required: false
-        default: ""
+
+  schedule:
+    - cron: '15 7 * * *' # 07:15 UTC / 08:15 UK during BST
 
 jobs:
   send-setup-reminders:
