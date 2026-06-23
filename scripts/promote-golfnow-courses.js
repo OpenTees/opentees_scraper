@@ -29,7 +29,22 @@ async function main() {
 
   if (error) throw error;
 
-  const rows = (data || []).map((row) => ({
+  const blockedNameTerms = [
+  "sim room",
+  "simulator",
+  "trackman",
+  "driving range",
+  "range",
+  "studio",
+];
+
+const eligible = (data || []).filter((row) => {
+  const name = String(row.course_name || "").toLowerCase();
+
+  return !blockedNameTerms.some((term) => name.includes(term));
+});
+
+  const rows = eligible.map((row) => ({
     course_name: row.course_name,
     county: row.county,
     provider: "golfnow",
