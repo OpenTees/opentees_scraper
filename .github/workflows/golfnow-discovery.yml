@@ -6,7 +6,10 @@ on:
       limit_nodes:
         description: "Number of discovery nodes to run"
         required: false
-        default: "3"
+        default: "8"
+
+  schedule:
+    - cron: '0 5 * * *'
 
 jobs:
   discover:
