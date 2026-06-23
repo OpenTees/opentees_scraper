@@ -8,6 +8,9 @@ on:
         required: false
         default: "50"
 
+  schedule:
+    - cron: '20 5 * * *'
+
 jobs:
   promote:
     runs-on: ubuntu-latest
@@ -15,7 +18,7 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      MIN_TEE_TIMES: ${{ github.event.inputs.min_tee_times }}
+      MIN_TEE_TIMES: ${{ github.event.inputs.min_tee_times || '50' }}
 
     steps:
       - name: Checkout
