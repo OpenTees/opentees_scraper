@@ -44,20 +44,33 @@ async function main() {
   if (discoveredError) throw discoveredError;
 
   const { data: existing, error: existingError } = await supabase
-    .from("courses")
-    .select("provider_course_id")
-    .eq("provider", "golfnow")
-    .not("provider_course_id", "is", null);
+  .from("courses")
+  .select("course_name, provider_course_id")
+  .not("course_name", "is", null);
 
   if (existingError) throw existingError;
 
-  const existingIds = new Set((existing || []).map((r) => String(r.provider_course_id)));
+  const existingIds = new Set(
+  (existing || [])
+    .map((r) => r.provider_course_id)
+    .filter(Boolean)
+    .map(String)
+);
+
+const existingNames = new Set(
+  (existing || [])
+    .map((r) => String(r.course_name || "").toLowerCase().trim())
+    .filter(Boolean)
+);
 
   const eligible = (discovered || []).filter((row) => {
     const providerCourseId = String(row.provider_course_id || "");
 
     if (!providerCourseId) return false;
     if (existingIds.has(providerCourseId)) return false;
+    const courseName = String(row.course_name || "").toLowerCase().trim();
+
+if (existingNames.has(courseName)) return false;
     if (isBlocked(row)) return false;
 
     return true;
