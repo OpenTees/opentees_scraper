@@ -1,0 +1,33 @@
+name: GolfNow Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_tee_times:
+        description: "Minimum tee times needed to promote a course"
+        required: false
+        default: "50"
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      MIN_TEE_TIMES: ${{ github.event.inputs.min_tee_times }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install @supabase/supabase-js
+
+      - name: Promote GolfNow courses
+        run: node scripts/promote-golfnow-courses.js
