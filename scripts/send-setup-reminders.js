@@ -94,7 +94,7 @@ function htmlEmail(email) {
                       </table>
 
                       <div style="margin-top:14px;color:rgba(255,255,255,0.96);font-size:30px;line-height:36px;font-weight:800;letter-spacing:-0.5px;">
-                        You’re one step away.
+                        You’re one step away from personalised tee time alerts.
                       </div>
 
                       <div style="margin-top:12px;color:rgba(255,255,255,0.82);font-size:16px;line-height:24px;">
