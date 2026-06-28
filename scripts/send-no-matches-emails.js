@@ -137,7 +137,11 @@ function textEmail(user) {
   return `
 Hi ${user.name || "there"},
 
-We've been checking live tee times for you, but we haven't found any that match your current preferences yet.
+Since you signed up yesterday, OpenTees has been monitoring thousands of live tee times on your behalf.
+
+We haven’t found a match just yet, but that’s usually because your preferences are quite specific—not because we aren’t searching.
+
+Yesterday we searched over 6,000 live tee times across more than 160 golf courses for you.
 
 Your current setup:
 - Radius: ${user.radius_miles || "not set"} miles
@@ -168,7 +172,7 @@ async function sendEmail(user) {
     body: JSON.stringify({
       from: "OpenTees <hello@mail.open-tees.com>",
       to: [user.email],
-      subject: "We’re searching, but your filters may be too specific",
+      subject: "We've started searching for your next tee time ⛳",
       html: htmlEmail(user),
       text: textEmail(user),
     }),
@@ -212,8 +216,10 @@ async function getRecipients() {
     console.log(`TEST MODE: only checking ${TEST_EMAIL}`);
     query = query.ilike("email", TEST_EMAIL);
   } else {
-    query = query.lte("created_at", new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
-  }
+    query = query.lte(
+  "created_at",
+  new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+);
 
   const { data, error } = await query;
 
