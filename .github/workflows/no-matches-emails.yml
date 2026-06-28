@@ -8,6 +8,9 @@ on:
         required: false
         default: ""
 
+        schedule:
+    - cron: '45 8 * * *' # 08:45 UTC / 09:45 UK during BST
+
 jobs:
   send-no-matches-emails:
     runs-on: ubuntu-latest
