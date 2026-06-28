@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
 
-        schedule:
+  schedule:
     - cron: '45 8 * * *' # 08:45 UTC / 09:45 UK during BST
 
 jobs:
