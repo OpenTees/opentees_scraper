@@ -220,6 +220,7 @@ async function getRecipients() {
   "created_at",
   new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 );
+}   
 
   const { data, error } = await query;
 
