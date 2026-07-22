@@ -1,8 +1,14 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const { createScraperMeasurement } = require("./measurement");
 
 const OUTPUT_DIR = path.join(process.cwd(), "scraper-output");
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://edkpdujmnwbiwowfwvpr.supabase.co";
+const measurement = createScraperMeasurement({
+  sourceName: "github-actions-open-tees-scraper",
+  provider: "mixed",
+});
 
 const COURSES = [
   {
@@ -310,7 +316,7 @@ async function scrapeCourse(browser, courseConfig) {
 async function importRows(importSecret, rows) {
   if (!rows.length) {
     console.log("No rows to import. Exiting successfully.");
-    return;
+    return { discovered_count: 0, updated_count: 0, expired_count: 0 };
   }
 
   const payload = {
@@ -319,12 +325,14 @@ async function importRows(importSecret, rows) {
   };
 
   const response = await fetch(
-    "https://edkpdujmnwbiwowfwvpr.supabase.co/functions/v1/ingest-tee-times",
+    `${SUPABASE_URL}/functions/v1/ingest-tee-times`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-import-secret": importSecret,
+        "x-correlation-id": measurement.correlationId,
+        "x-scraper-run-id": measurement.scraperRunId,
       },
       body: JSON.stringify(payload),
     },
@@ -338,10 +346,13 @@ async function importRows(importSecret, rows) {
   if (!response.ok) {
     throw new Error(`Import failed: ${response.status} ${responseText}`);
   }
+
+  return JSON.parse(responseText);
 }
 
 async function run() {
   ensureOutputDir();
+  await measurement.emit("scraper.started", { authoritative: false });
 
   const importSecret = process.env.MANUAL_IMPORT_SECRET;
 
@@ -396,10 +407,23 @@ async function run() {
   console.log("SCRAPE SUMMARY:");
   console.log(JSON.stringify(summary, null, 2));
 
-  await importRows(importSecret, allRows);
+  const importResult = await importRows(importSecret, allRows);
+  await measurement.emit("scraper.completed", {
+    duration_ms: measurement.durationMs(),
+    new_slots: Number(importResult.discovered_count || 0),
+    updated_slots: Number(importResult.updated_count || 0),
+    expired_slots: Number(importResult.expired_count || 0),
+    courses_attempted: courseResults.length,
+    courses_failed: courseResults.filter((result) => !result.ok).length,
+  });
 }
 
-run().catch((error) => {
-  console.error(error);
+run().catch(async (error) => {
+  await measurement.emit("scraper.failed", {
+    failure_stage: "scrape_or_import",
+    error_class: error instanceof Error ? error.name : "UnknownError",
+    duration_ms: measurement.durationMs(),
+  });
+  console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

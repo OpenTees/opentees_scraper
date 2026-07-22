@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const { createScraperMeasurement } = require("./measurement");
 
 const OUTPUT_DIR = path.join(process.cwd(), "scraper-output-v2-import");
 
@@ -9,6 +10,10 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
 const PROVIDER = "brs";
+const measurement = createScraperMeasurement({
+  sourceName: "github-actions-scrape-from-courses-v2-import",
+  provider: PROVIDER,
+});
 
 const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
 
@@ -251,6 +256,8 @@ async function importRows(rows) {
       headers: {
         "Content-Type": "application/json",
         "x-import-secret": MANUAL_IMPORT_SECRET,
+        "x-correlation-id": measurement.correlationId,
+        "x-scraper-run-id": measurement.scraperRunId,
       },
       body: JSON.stringify(payload),
     }
@@ -268,12 +275,13 @@ async function importRows(rows) {
   return {
     skipped: false,
     imported: rows.length,
-    responseText,
+    response: JSON.parse(responseText),
   };
 }
 
 async function run() {
   ensureOutputDir();
+  await measurement.emit("scraper.started", { authoritative: false });
 
   const courses = await fetchCoursesFromSupabase();
 
@@ -348,9 +356,23 @@ async function run() {
 
   console.log("V2 IMPORT SUMMARY:");
   console.log(JSON.stringify(summary, null, 2));
+
+  await measurement.emit("scraper.completed", {
+    duration_ms: measurement.durationMs(),
+    new_slots: Number(importResult.response?.discovered_count || 0),
+    updated_slots: Number(importResult.response?.updated_count || 0),
+    expired_slots: Number(importResult.response?.expired_count || 0),
+    courses_attempted: courses.length,
+    courses_failed: summary.failedCourses,
+  });
 }
 
-run().catch((error) => {
-  console.error(error);
+run().catch(async (error) => {
+  await measurement.emit("scraper.failed", {
+    failure_stage: "scrape_or_import",
+    error_class: error instanceof Error ? error.name : "UnknownError",
+    duration_ms: measurement.durationMs(),
+  });
+  console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

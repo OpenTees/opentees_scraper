@@ -1,8 +1,13 @@
 const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
+const { createScraperMeasurement } = require("../scraper/measurement");
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const measurement = createScraperMeasurement({
+  sourceName: "github-actions-golfnow-discovery",
+  provider: "golfnow",
+});
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   realtime: {
@@ -10,6 +15,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   },
 });
 async function main() {
+  await measurement.emit("scraper.started", { authoritative: false });
   const { data: nodes, error } = await supabase
     .from("golfnow_discovery_nodes")
     .select("*")
@@ -138,6 +144,14 @@ if (dedupedRows.length) {
 
  console.log(`Saved ${dedupedRows.length} discovered facilities`);
 
+  await measurement.emit("scraper.completed", {
+    duration_ms: measurement.durationMs(),
+    new_slots: 0,
+    updated_slots: 0,
+    expired_slots: 0,
+    facilities_discovered: dedupedRows.length,
+  });
+
 console.table(
   dedupedRows
     .sort((a, b) => b.number_of_tee_times - a.number_of_tee_times)
@@ -151,7 +165,12 @@ console.table(
 );
 }
 
-main().catch((err) => {
-  console.error(err);
+main().catch(async (err) => {
+  await measurement.emit("scraper.failed", {
+    failure_stage: "facility_discovery",
+    error_class: err instanceof Error ? err.name : "UnknownError",
+    duration_ms: measurement.durationMs(),
+  });
+  console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

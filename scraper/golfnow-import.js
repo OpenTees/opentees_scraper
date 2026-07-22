@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { createScraperMeasurement } = require("./measurement");
 
 const OUTPUT_DIR = path.join(process.cwd(), "golfnow-import-output");
 
@@ -9,6 +10,10 @@ const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
 const PROVIDER = "golfnow";
 const IMPORT_CHUNK_SIZE = 100;
+const measurement = createScraperMeasurement({
+  sourceName: "github-actions-golfnow-import",
+  provider: PROVIDER,
+});
 
 function ensureOutputDir() {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -272,6 +277,8 @@ async function importRows(rows) {
       headers: {
         "Content-Type": "application/json",
         "x-import-secret": MANUAL_IMPORT_SECRET,
+        "x-correlation-id": measurement.correlationId,
+        "x-scraper-run-id": measurement.scraperRunId,
       },
       body: JSON.stringify(payload),
     }
@@ -289,7 +296,7 @@ async function importRows(rows) {
   return {
     skipped: false,
     imported: rows.length,
-    responseText,
+    response: JSON.parse(responseText),
   };
 }
 
@@ -310,6 +317,9 @@ async function importRowsInChunks(rows) {
   );
 
   let totalImported = 0;
+  let totalDiscovered = 0;
+  let totalUpdated = 0;
+  let totalExpired = 0;
   const chunkResults = [];
 
   for (let i = 0; i < chunks.length; i += 1) {
@@ -321,12 +331,17 @@ async function importRowsInChunks(rows) {
       const result = await importRows(chunk);
 
       totalImported += chunk.length;
+      totalDiscovered += Number(result.response?.discovered_count || 0);
+      totalUpdated += Number(result.response?.updated_count || 0);
+      totalExpired += Number(result.response?.expired_count || 0);
 
       chunkResults.push({
         chunk: i + 1,
         rows: chunk.length,
         success: true,
-        responseText: result.responseText,
+        discovered_count: Number(result.response?.discovered_count || 0),
+        updated_count: Number(result.response?.updated_count || 0),
+        expired_count: Number(result.response?.expired_count || 0),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -345,12 +360,16 @@ async function importRowsInChunks(rows) {
   return {
     skipped: false,
     imported: totalImported,
+    discovered_count: totalDiscovered,
+    updated_count: totalUpdated,
+    expired_count: totalExpired,
     chunks: chunkResults,
   };
 }
 
 async function run() {
   ensureOutputDir();
+  await measurement.emit("scraper.started", { authoritative: false });
 
   const courses = await fetchCoursesFromSupabase();
 
@@ -421,9 +440,23 @@ async function run() {
 
   console.log("GOLFNOW IMPORT SUMMARY:");
   console.log(JSON.stringify(summary, null, 2));
+
+  await measurement.emit("scraper.completed", {
+    duration_ms: measurement.durationMs(),
+    new_slots: Number(importResult.discovered_count || 0),
+    updated_slots: Number(importResult.updated_count || 0),
+    expired_slots: Number(importResult.expired_count || 0),
+    courses_attempted: courses.length,
+    courses_failed: summary.failedCourses,
+  });
 }
 
-run().catch((error) => {
-  console.error(error);
+run().catch(async (error) => {
+  await measurement.emit("scraper.failed", {
+    failure_stage: "scrape_or_import",
+    error_class: error instanceof Error ? error.name : "UnknownError",
+    duration_ms: measurement.durationMs(),
+  });
+  console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

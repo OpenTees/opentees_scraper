@@ -18,6 +18,8 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      MEASUREMENT_INGEST_SECRET: ${{ secrets.MEASUREMENT_INGEST_SECRET }}
+      MEASUREMENT_ENVIRONMENT: production
       LIMIT_NODES: ${{ github.event.inputs.limit_nodes }}
 
     steps:

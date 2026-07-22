@@ -28,6 +28,9 @@ jobs:
         run: node scraper/scrape.js
         env:
           MANUAL_IMPORT_SECRET: ${{ secrets.MANUAL_IMPORT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          MEASUREMENT_INGEST_SECRET: ${{ secrets.MEASUREMENT_INGEST_SECRET }}
+          MEASUREMENT_ENVIRONMENT: production
 
       - name: Upload screenshot artifact
         if: always()
