@@ -46,6 +46,12 @@ function normalisePrice(value) {
   return Number.isFinite(number) ? Math.round(number) : null;
 }
 
+function holesForRate(rate) {
+  if (rate?.isEighteen === true && rate?.isNine !== true) return 18;
+  if (rate?.isNine === true && rate?.isEighteen !== true) return 9;
+  return null;
+}
+
 async function fetchCoursesFromSupabase() {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
@@ -181,6 +187,7 @@ function mapTeeTimes(json, course) {
         slot_time: slotTime,
         price,
         players: 4,
+        holes: holesForRate(rate),
         booking_url: bookingUrl,
         google_rating: course.googleRating,
         google_reviews: course.googleReviews,
@@ -423,7 +430,11 @@ async function run() {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-run().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = { mapTeeTimes };
