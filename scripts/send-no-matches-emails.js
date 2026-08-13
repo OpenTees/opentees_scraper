@@ -13,14 +13,25 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !RESEND_API_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-function preferencesUrl(email) {
-  return `${SITE_URL}/profile-setup?email=${encodeURIComponent(email)}&utm_source=no_matches_email&utm_medium=email&utm_campaign=improve_preferences`;
+// Points at the homepage, not a direct preferences deep link — see the
+// identical note in scripts/send-setup-reminders.js. This recipient does
+// have a real, completed user_preferences row, but this script has no
+// access to the server-side secret needed to mint a valid signed
+// edit_token for it; re-entering their email on the homepage goes through
+// early_access, which already knows how to issue one securely today.
+//
+// Deliberately does NOT take an email parameter: the previous version put
+// the raw email address in this URL as an "email" query parameter, the exact scheme
+// save-preferences no longer trusts. See
+// supabase/docs/frictionless-signup-attribution-design.md §0.
+function preferencesUrl() {
+  return `${SITE_URL}/?utm_source=no_matches_email&utm_medium=email&utm_campaign=improve_preferences`;
 }
 
 function htmlEmail(user) {
   const email = user.email;
   const name = user.name || "there";
-  const url = preferencesUrl(email);
+  const url = preferencesUrl();
 
   const LOGO_URL =
     "https://edkpdujmnwbiwowfwvpr.supabase.co/storage/v1/object/public/OpenTees%20Logo/assists/White%20Logo.png";
@@ -153,7 +164,7 @@ Your current setup:
 A small change can make a big difference. Try increasing your travel radius, including more times of day, or adding weekdays if you can play midweek.
 
 Update your preferences:
-${preferencesUrl(user.email)}
+${preferencesUrl()}
 
 We'll keep searching for you. As soon as a tee time matches your preferences, we'll send you an alert.
 

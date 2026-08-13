@@ -13,13 +13,27 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !RESEND_API_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-function setupUrl(email) {
-  return `${SITE_URL}/profile-setup?email=${encodeURIComponent(email)}&utm_source=setup_reminder&utm_medium=email&utm_campaign=complete_setup`;
+// Points at the homepage, not a direct preferences deep link. This
+// reminder has no signed edit_token to offer (minting one requires the
+// same server-side secret early_access/save-preferences use, which this
+// script does not currently have access to) — sending it straight to
+// /preferences would just show the "open this using the secure link in
+// your email" disabled state. The homepage's own email-capture form is
+// the correct, already-working way for the golfer to request a fresh
+// secure link themselves.
+//
+// Deliberately does NOT take an email parameter: the previous version put
+// the raw email address in this URL as an "email" query parameter, exactly the
+// pre-token-security-fix scheme save-preferences no longer trusts, and
+// exposes the address in browser history/logs. See
+// supabase/docs/frictionless-signup-attribution-design.md §0.
+function setupUrl() {
+  return `${SITE_URL}/?utm_source=setup_reminder&utm_medium=email&utm_campaign=complete_setup`;
 }
 
 function htmlEmail(email) {
   const SITE_URL = "https://www.open-tees.com";
-  const PROFILE_SETUP_URL = setupUrl(email);
+  const PROFILE_SETUP_URL = setupUrl();
 
   const LOGO_URL =
     "https://edkpdujmnwbiwowfwvpr.supabase.co/storage/v1/object/public/OpenTees%20Logo/assists/White%20Logo.png";
@@ -168,7 +182,7 @@ You joined OpenTees, but your alert preferences haven’t been completed yet.
 Without those details, we can’t match you with the best last-minute tee times near you.
 
 Complete your setup here:
-${setupUrl(email)}
+${setupUrl()}
 
 It takes less than 60 seconds to choose your location, travel distance, preferred times and max price.
 
