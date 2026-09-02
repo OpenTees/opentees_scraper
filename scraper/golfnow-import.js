@@ -51,6 +51,12 @@ function normalisePrice(value) {
   return Number.isFinite(number) ? Math.round(number) : null;
 }
 
+function holesForRate(rate) {
+  if (rate?.isEighteen === true && rate?.isNine !== true) return 18;
+  if (rate?.isNine === true && rate?.isEighteen !== true) return 9;
+  return null;
+}
+
 async function fetchCoursesFromSupabase() {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
@@ -186,6 +192,7 @@ function mapTeeTimes(json, course) {
         slot_time: slotTime,
         price,
         players: 4,
+        holes: holesForRate(rate),
         booking_url: bookingUrl,
         google_rating: course.googleRating,
         google_reviews: course.googleReviews,
@@ -451,12 +458,16 @@ async function run() {
   });
 }
 
-run().catch(async (error) => {
-  await measurement.emit("scraper.failed", {
-    failure_stage: "scrape_or_import",
-    error_class: error instanceof Error ? error.name : "UnknownError",
-    duration_ms: measurement.durationMs(),
+if (require.main === module) {
+  run().catch(async (error) => {
+    await measurement.emit("scraper.failed", {
+      failure_stage: "scrape_or_import",
+      error_class: error instanceof Error ? error.name : "UnknownError",
+      duration_ms: measurement.durationMs(),
+    });
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
   });
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+}
+
+module.exports = { mapTeeTimes };
