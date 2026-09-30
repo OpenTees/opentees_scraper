@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const lifecycleShadow = require("./lifecycle-shadow");
 
 const OUTPUT_DIR = path.join(process.cwd(), "scraper-output-v2-import");
 
@@ -9,6 +10,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
 const PROVIDER = "brs";
+const RUN_CORRELATION_ID = crypto.randomUUID();
 
 const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
 
@@ -54,7 +56,7 @@ async function fetchCoursesFromSupabase() {
 
   const url =
   `${SUPABASE_URL}/rest/v1/courses` +
-  `?select=course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled,scrape_enabled` +
+  `?select=id,course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled,scrape_enabled,lifecycle_pilot_state,lifecycle_generation` +
   `&provider=eq.${PROVIDER}` +
   `&scrape_enabled=eq.true` +
   `&target_url=not.is.null` +
@@ -77,6 +79,7 @@ async function fetchCoursesFromSupabase() {
   const rows = JSON.parse(text);
 
   return rows.map((course) => ({
+    id: course.id,
     targetUrl: course.target_url,
     courseName: course.course_name,
     providerCourseId: course.provider_course_id,
@@ -85,6 +88,12 @@ async function fetchCoursesFromSupabase() {
     googleReviews: course.google_reviews,
     provider: course.provider,
     enabled: course.enabled,
+    // Absent on any Supabase project that hasn't applied the lifecycle
+    // migration yet (undefined, not an error) — defaults to 'legacy' /
+    // shadow-inert behaviour below, exactly like every course that has
+    // never been moved off its default.
+    lifecyclePilotState: course.lifecycle_pilot_state ?? "legacy",
+    lifecycleGeneration: course.lifecycle_generation ?? 0,
   }));
 }
 
@@ -272,6 +281,30 @@ async function importRows(rows) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shadow mode (lifecycle_pilot_state = 'shadow') — computes and logs a
+// proposed stable identity + reconciliation decision without ever touching
+// tee_times. Only reached for a course explicitly moved to 'shadow'; every
+// course at its default ('legacy') never calls any of this.
+// ---------------------------------------------------------------------------
+
+const shadowConfig = {
+  supabaseUrl: SUPABASE_URL,
+  supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY,
+  manualImportSecret: MANUAL_IMPORT_SECRET,
+  correlationId: RUN_CORRELATION_ID,
+};
+
+async function runShadowProposalForCourse(courseConfig, slotDate, scraperRunId, teesheetJsonOverride) {
+  return lifecycleShadow.runBrsShadowProposalForCourse(
+    shadowConfig,
+    courseConfig,
+    slotDate,
+    scraperRunId,
+    teesheetJsonOverride,
+  );
+}
+
 async function run() {
   ensureOutputDir();
 
@@ -295,7 +328,49 @@ async function run() {
     try {
       const result = await scrapeCourse(browser, courseConfig);
       courseResults.push(result);
-      allRows.push(...result.extractedRows);
+
+      const state = courseConfig.lifecyclePilotState;
+
+      if (state === "stable_active" || state === "stable_reconciling") {
+        // Stable states: legacy identity is never built or sent for this
+        // course — it is deliberately excluded from allRows/uniqueRows,
+        // so the unfenced legacy ingestion call below cannot touch it.
+        // Stable rows go through the snapshot-token path instead (begin
+        // -> fresh BRS teesheet fetch -> apply), using a fresh BRS
+        // teesheet fetch (the HTML-scrape extraction above doesn't carry
+        // BRS's provider slot id, which the stable identity needs). The
+        // token is obtained before this fetch, not after, so an older
+        // in-flight scrape can never silently overwrite a newer one once
+        // both reach the database.
+        try {
+          const activeResult = await lifecycleShadow.runBrsSnapshotIngestion(
+            shadowConfig,
+            courseConfig,
+            todayIsoDate(),
+          );
+          console.log(`[${courseConfig.courseName}] STABLE INGESTION (${state}):`, JSON.stringify(activeResult, null, 2));
+        } catch (activeError) {
+          console.error(`[${courseConfig.courseName}] STABLE INGESTION ERROR:`, activeError);
+        }
+      } else {
+        // legacy or shadow: today's unchanged legacy identity/ingestion.
+        allRows.push(...result.extractedRows);
+      }
+
+      // Shadow mode: computes and logs a proposal only, via a completely
+      // separate call — never alters `allRows`/`uniqueRows`, so the
+      // legacy ingestion path below is byte-for-byte unaffected by this.
+      if (state === "shadow") {
+        try {
+          await runShadowProposalForCourse(
+            courseConfig,
+            todayIsoDate(),
+            null,
+          );
+        } catch (shadowError) {
+          console.error(`[${courseConfig.courseName}] SHADOW PROPOSAL ERROR:`, shadowError);
+        }
+      }
     } catch (error) {
       console.error(`[${courseConfig.courseName}] V2 IMPORT SCRAPE ERROR:`, error);
 
@@ -350,7 +425,16 @@ async function run() {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-run().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Guarded so this file remains directly runnable (`node scrape-from-courses-v2-import.js`,
+// unchanged behaviour) while also being safely `require()`-able for local
+// testing of the shadow-mode functions without triggering a live Playwright run.
+if (require.main === module) {
+  run().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  runShadowProposalForCourse,
+};

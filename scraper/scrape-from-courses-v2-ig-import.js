@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const lifecycleShadow = require("./lifecycle-shadow");
 
 const OUTPUT_DIR = path.join(process.cwd(), "scraper-output-v2-ig-import");
 
@@ -9,6 +10,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MANUAL_IMPORT_SECRET = process.env.MANUAL_IMPORT_SECRET;
 
 const PROVIDER = "intelligent_golf";
+const RUN_CORRELATION_ID = crypto.randomUUID();
 
 const COURSE_TIMEOUT_MS = Number(process.env.COURSE_TIMEOUT_MS || 45000);
 
@@ -56,6 +58,15 @@ function extractDateFromUrl(targetUrl) {
   return match ? match[1] : null;
 }
 
+// Same-day-only scraping (unchanged elsewhere in this scraper): the
+// expected slot date for a snapshot-token begin call is always today,
+// determined before the Playwright fetch runs. The date later extracted
+// from the actual page (result.slotDate) confirms what was really
+// returned and is what gets sent to apply_lifecycle_snapshot itself.
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function normalisePrice(priceText) {
   if (!priceText) return null;
 
@@ -90,7 +101,7 @@ async function fetchCoursesFromSupabase() {
 
   const url =
   `${SUPABASE_URL}/rest/v1/courses` +
-  `?select=course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled,scrape_enabled` +
+  `?select=id,course_name,target_url,provider_course_id,course_slug,google_rating,google_reviews,provider,enabled,scrape_enabled,lifecycle_pilot_state,lifecycle_generation` +
   `&provider=eq.${PROVIDER}` +
   `&scrape_enabled=eq.true` +
   `&target_url=not.is.null` +
@@ -113,6 +124,7 @@ async function fetchCoursesFromSupabase() {
   const rows = JSON.parse(text);
 
   return rows.map((course) => ({
+    id: course.id,
     targetUrl: course.target_url,
     courseName: course.course_name,
     providerCourseId: course.provider_course_id,
@@ -121,8 +133,12 @@ async function fetchCoursesFromSupabase() {
     googleReviews: course.google_reviews,
     provider: course.provider,
     enabled: course.enabled,
+    lifecyclePilotState: course.lifecycle_pilot_state ?? "legacy",
+    lifecycleGeneration: course.lifecycle_generation ?? 0,
   }));
 }
+
+const { isIgSnapshotComplete } = lifecycleShadow;
 
 function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate) {
   const extractedRows = [];
@@ -251,6 +267,8 @@ async function scrapeCourseInner(browser, courseConfig) {
       provider: courseConfig.provider,
       extractedRows,
       info,
+      slotDate: slotDate || null,
+      snapshotComplete: isIgSnapshotComplete(bodyText, title, slotDate),
     };
   } finally {
     await page.close().catch(() => {});
@@ -316,6 +334,37 @@ async function importRows(rows) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shadow mode (lifecycle_pilot_state = 'shadow') — mirrors the BRS wiring:
+// computes and logs a proposal only, never touches tee_times.
+// ---------------------------------------------------------------------------
+
+// Caller-asserted snapshot completeness for IG: true only when the page
+// showed real teesheet markers and NOT a login-wall/error page. This
+// mirrors the stricter IG rule established during investigation — IG has
+// no structural "echoes the request back" signal like BRS's tee_date, so
+// an untrusted/ambiguous page is never treated as a genuine empty
+// snapshot. The caller (scrapeCourseInner) is the only place that can
+// actually observe the page and make this determination; this module
+// takes it as an input rather than re-deriving it from a URL/HTML string.
+const shadowConfig = {
+  supabaseUrl: SUPABASE_URL,
+  supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY,
+  manualImportSecret: MANUAL_IMPORT_SECRET,
+  correlationId: RUN_CORRELATION_ID,
+};
+
+async function runShadowProposalForCourse(courseConfig, slotDate, scraperRunId, snapshotComplete, extractedRowsForShadow) {
+  return lifecycleShadow.runIgShadowProposalForCourse(
+    shadowConfig,
+    courseConfig,
+    slotDate,
+    scraperRunId,
+    snapshotComplete,
+    extractedRowsForShadow,
+  );
+}
+
 async function run() {
   ensureOutputDir();
 
@@ -337,9 +386,66 @@ async function run() {
 
   for (const courseConfig of courses) {
     try {
+      const state = courseConfig.lifecyclePilotState;
+      const isStableState = state === "stable_active" || state === "stable_reconciling";
+
+      // Snapshot token must be obtained BEFORE the provider network
+      // request — here, the Playwright page navigation inside
+      // scrapeCourse. Same-day-only scraping means the expected date is
+      // always today, known ahead of the fetch.
+      let snapshotBegin = null;
+      if (isStableState) {
+        snapshotBegin = await lifecycleShadow.beginLifecycleSnapshot(shadowConfig, courseConfig, todayIsoDate());
+        if (!snapshotBegin.body?.ok) {
+          console.error(`[${courseConfig.courseName}] BEGIN SNAPSHOT REJECTED:`, JSON.stringify(snapshotBegin, null, 2));
+        }
+      }
+
       const result = await scrapeCourse(browser, courseConfig);
       courseResults.push(result);
-      allRows.push(...result.extractedRows);
+
+      const extractedForShadow = result.extractedRows.map((r) => ({ slotTime: r.slot_time, price: r.price }));
+
+      if (isStableState && result.slotDate) {
+        // Stable states: legacy identity is never built or sent — this
+        // course is excluded from allRows/uniqueRows entirely.
+        if (!snapshotBegin?.body?.ok) {
+          console.error(`[${courseConfig.courseName}] SKIPPED STABLE INGESTION: begin_lifecycle_snapshot was rejected before the fetch, no apply attempted.`);
+        } else {
+          try {
+            const activeResult = await lifecycleShadow.applyIgSnapshotIngestion(
+              shadowConfig,
+              courseConfig,
+              result.slotDate,
+              snapshotBegin.body.snapshot_token,
+              result.snapshotComplete,
+              extractedForShadow,
+            );
+            console.log(`[${courseConfig.courseName}] STABLE INGESTION (${state}):`, JSON.stringify(activeResult, null, 2));
+          } catch (activeError) {
+            console.error(`[${courseConfig.courseName}] STABLE INGESTION ERROR:`, activeError);
+          }
+        }
+      } else if (!isStableState) {
+        allRows.push(...result.extractedRows);
+      }
+
+      // Shadow mode: separate call, logs a proposal only, never alters
+      // allRows/uniqueRows — the legacy ingestion path below is
+      // byte-for-byte unaffected by this.
+      if (state === "shadow" && result.slotDate) {
+        try {
+          await runShadowProposalForCourse(
+            courseConfig,
+            result.slotDate,
+            null,
+            result.snapshotComplete,
+            extractedForShadow,
+          );
+        } catch (shadowError) {
+          console.error(`[${courseConfig.courseName}] SHADOW PROPOSAL ERROR:`, shadowError);
+        }
+      }
     } catch (error) {
       console.error(`[${courseConfig.courseName}] V2 IG IMPORT SCRAPE ERROR:`, error);
 
@@ -394,7 +500,14 @@ async function run() {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-run().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  runShadowProposalForCourse,
+  isIgSnapshotComplete,
+};
