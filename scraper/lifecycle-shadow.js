@@ -241,12 +241,107 @@ async function sendShadowProposal(config, courseConfig, slotDate, proposal, scra
   return { status: response.status, body: responseText };
 }
 
+// BRS's visitor-booking SPA (visitors.brsgolf.com/<club-slug>) is
+// multi-tenant: every API call, including course discovery, must carry
+// an `X-Club-Id: <club-slug>` header or the API cannot identify which
+// club's data to return at all (confirmed against production: identical
+// request without this header returns 500 for every real club tested,
+// regardless of course_id). This was the actual root cause of every BRS
+// club's shadow snapshot coming back incomplete in production, not the
+// course_id value — course_id=1 already worked once the header was
+// added. Deliberately never guessed/hardcoded per club: the correct
+// club-id is always derivable from the club's own target_url path.
+function deriveBrsClubSlug(targetUrl) {
+  try {
+    const url = new URL(targetUrl);
+    const slug = url.pathname.replace(/^\/+|\/+$/g, "").split("/")[0];
+    return slug || null;
+  } catch {
+    return null;
+  }
+}
+
+// Discovers the correct BRS-internal course_id for a club via the same
+// /api/courses/all endpoint the real visitor-booking SPA itself calls —
+// never a maintained manual mapping. Confirmed against 9 real production
+// BRS clubs: every club has at least one course, and id 1 is present in
+// 100% of them — for a single-course club it's trivially the only
+// course; for a multi-course (shotgun-start) club it's consistently the
+// named "1st Tee" alongside a "10th"/"9th Tee" alternate, i.e. the
+// conventional default visitor teesheet. That is the ONLY multi-course
+// case this treats as resolved — if a club returns more than one course
+// and none of them is id 1, which course_id to use is genuinely
+// ambiguous and there is no evidence-based way to pick one, so this
+// fails closed (returns null) rather than guessing. Any network error,
+// non-200 response, empty body, or malformed/non-array JSON also fails
+// closed the same way.
+async function discoverBrsCourseId(courseConfig) {
+  const clubSlug = deriveBrsClubSlug(courseConfig.targetUrl);
+  if (!clubSlug) return null;
+
+  let origin;
+  try {
+    origin = new URL(courseConfig.targetUrl).origin;
+  } catch {
+    return null;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${origin}/api/courses/all`, {
+      headers: { "X-Requested-With": "XMLHttpRequest", "X-Club-Id": clubSlug },
+    });
+  } catch {
+    return null;
+  }
+
+  if (!response.ok) return null;
+
+  let courses;
+  try {
+    const text = await response.text();
+    courses = JSON.parse(text);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(courses) || courses.length === 0) return null;
+
+  if (courses.length === 1) {
+    const onlyId = courses[0]?.id;
+    return Number.isInteger(onlyId) ? onlyId : null;
+  }
+
+  const hasCourseOne = courses.some((c) => c && c.id === 1);
+  return hasCourseOne ? 1 : null;
+}
+
 async function fetchBrsTeesheetJson(courseConfig, slotDate) {
-  const origin = new URL(courseConfig.targetUrl).origin;
-  const response = await fetch(
-    `${origin}/api/casualBooking/teesheet?date=${slotDate}&course_id=1`,
-    { headers: { "X-Requested-With": "XMLHttpRequest" } },
-  );
+  const clubSlug = deriveBrsClubSlug(courseConfig.targetUrl);
+  if (!clubSlug) return null;
+
+  const courseId = await discoverBrsCourseId(courseConfig);
+  if (courseId === null) return null;
+
+  let origin;
+  try {
+    origin = new URL(courseConfig.targetUrl).origin;
+  } catch {
+    return null;
+  }
+
+  let response;
+  try {
+    response = await fetch(
+      `${origin}/api/casualBooking/teesheet?date=${slotDate}&course_id=${courseId}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest", "X-Club-Id": clubSlug } },
+    );
+  } catch {
+    return null;
+  }
+
+  if (!response.ok) return null;
+
   const text = await response.text();
   try {
     return JSON.parse(text);
@@ -475,6 +570,8 @@ module.exports = {
   computeIgShadowProposal,
   fetchActiveLegacyExternalIds,
   sendShadowProposal,
+  deriveBrsClubSlug,
+  discoverBrsCourseId,
   fetchBrsTeesheetJson,
   runBrsShadowProposalForCourse,
   runIgShadowProposalForCourse,
