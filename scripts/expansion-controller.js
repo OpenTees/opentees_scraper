@@ -23,18 +23,24 @@
 // successful dispatch) is implemented throughout: after dispatching
 // discovery, the controller checks golfnow_discovery_nodes.last_run_at
 // actually advanced per node; after dispatching promotion, it checks
-// courses rows actually exist for this batch's coordinates; the
-// "promoted" -> "verifying" transition reads the actual golfnow-import
-// run's own per-course summary.json artifact, not just "the workflow
-// succeeded".
+// courses rows actually exist for this batch; the "promoted" ->
+// "verifying" transition reads the actual golfnow-import run's own
+// per-course summary.json artifact, not just "the workflow succeeded".
+//
+// Batch ownership (PR #2 correction): every join between a discovered
+// facility and a batch goes through golfnow_discovered_facilities
+// .discovery_node_id -> golfnow_discovery_nodes.id -> .batch_id. Never
+// through discovery_latitude/discovery_longitude coordinate equality --
+// a facility row's coordinates only ever reflect whichever node most
+// recently upserted it, and two unrelated nodes (two different approved
+// batches, or a controller batch and a legacy manual node) could in
+// principle share exact coordinates, which coordinate matching could
+// not tell apart. See promote-golfnow-courses.js's
+// loadControllerNodeOwnership() for the same rule applied there.
 
 const WORKFLOW_DISCOVERY = "golfnow-discovery.yml";
 const WORKFLOW_PROMOTE = "golfnow-promote.yml";
 const WORKFLOW_IMPORT = "golfnow-import.yml";
-
-function coordKey(lat, lon) {
-  return `${Number(lat)},${Number(lon)}`;
-}
 
 // Pure: given the global config and whether any batch is already
 // mid-flight, decide what (if anything) to do this tick.
@@ -158,7 +164,6 @@ function classifyImportResults(summaryJson, batchCourseNames) {
 }
 
 module.exports = {
-  coordKey,
   decideTick,
   evaluateValidation,
   shouldRetryNode,

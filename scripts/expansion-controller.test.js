@@ -2,7 +2,6 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
-  coordKey,
   decideTick,
   evaluateValidation,
   shouldRetryNode,
@@ -151,8 +150,37 @@ test("classifyImportResults: name matching is case/whitespace insensitive", () =
   assert.equal(result.results[0].state, "has_inventory");
 });
 
-// --- coordKey --------------------------------------------------------------
+// --- batch ownership (PR #2 correction) -------------------------------------
+//
+// evaluateValidation itself is ownership-mechanism-agnostic (it only reads
+// the fromOtherBatch count it's handed) -- these tests document and lock in
+// that the I/O layer must compute fromOtherBatch via discovery_node_id
+// ownership, never via discovery_latitude/discovery_longitude coordinate
+// equality (see promote-golfnow-courses.js's loadControllerNodeOwnership()
+// and this module's own header comment for why coordinate matching is
+// unreliable: two unrelated nodes can share exact coordinates).
 
-test("coordKey: stable, numeric-normalised key so '52.80' and 52.8 (string vs number from different sources) match", () => {
-  assert.equal(coordKey("52.8067", "-2.1174"), coordKey(52.8067, -2.1174));
+test("evaluateValidation: leakage detected via node ownership (fromOtherBatch) fails the batch even when two batches' nodes share identical coordinates", () => {
+  // Simulates the exact failure mode coordinate matching could not catch:
+  // batch A's node and batch B's node both sit at the same lat/lon (e.g.
+  // two approved batches that happen to target the same city), but
+  // ownership is tracked by discovery_node_id, so the stats correctly
+  // attribute 3 facilities to "a different batch" regardless of the
+  // coordinate collision.
+  const nodes = [node("Stafford")];
+  const discoveredByNode = new Map([
+    ["Stafford", { discovered: 10, eligible: 10, blocklisted: 0, fromOtherBatch: 3 }],
+  ]);
+  const result = evaluateValidation(nodes, discoveredByNode);
+  assert.equal(result.pass, false);
+  assert.equal(result.details.leakage, 3);
+});
+
+test("evaluateValidation: zero leakage passes even when discoveredByNode reflects facilities from a coordinate-identical but ownership-distinct node", () => {
+  const nodes = [node("Stafford")];
+  const discoveredByNode = new Map([
+    ["Stafford", { discovered: 10, eligible: 10, blocklisted: 0, fromOtherBatch: 0 }],
+  ]);
+  const result = evaluateValidation(nodes, discoveredByNode);
+  assert.equal(result.pass, true);
 });

@@ -108,6 +108,12 @@ if (
         discovery_latitude: Number(node.latitude),
         discovery_longitude: Number(node.longitude),
         discovery_radius: Number(node.radius || 35),
+        // Reliable batch/node ownership (see migration
+        // golfnow_discovered_facilities_node_ownership) -- never rely on
+        // discovery_latitude/discovery_longitude for this: they only
+        // reflect whichever node most recently upserted the row, and
+        // two different nodes could coincide on the same coordinates.
+        discovery_node_id: node.id,
         last_seen_at: new Date().toISOString(),
       });
     }

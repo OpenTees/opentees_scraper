@@ -48,39 +48,38 @@ function isBlocked(row) {
   return blockedNameTerms.some((term) => name.includes(term));
 }
 
-function coordKey(lat, lon) {
-  return `${Number(lat)},${Number(lon)}`;
-}
-
 // Loads every controller-managed discovery node (batch_id not null)
-// together with its batch's current status. Legacy/manual nodes
-// (batch_id null -- every node that existed before the controller, plus
-// anything added by hand in future) are entirely unaffected: they were
-// never in this set and this function's result never excludes them.
-async function loadControllerNodeCoordinates() {
+// together with its batch's current status, keyed by node id -- never
+// by coordinate. Reliable batch ownership requires this: two different
+// approved batches (or a controller batch and a legacy manual node)
+// could in principle share exact coordinates, which coordinate matching
+// could not tell apart. Legacy/manual nodes (batch_id null -- every node
+// that existed before the controller, plus anything added by hand in
+// future) are entirely unaffected: they were never in this set and this
+// function's result never excludes them.
+async function loadControllerNodeOwnership() {
   const { data, error } = await supabase
     .from("golfnow_discovery_nodes")
-    .select("latitude, longitude, batch_id, golfnow_expansion_batches(status)")
+    .select("id, batch_id, golfnow_expansion_batches(status)")
     .not("batch_id", "is", null);
 
   if (error) throw error;
 
-  const inFlight = new Set(); // not yet cleared -- exclude from unscoped runs
-  const batchCoords = new Map(); // batch_id -> Set(coordKey) -- for BATCH_ID scoping
+  const inFlightNodeIds = new Set(); // not yet cleared -- exclude from unscoped runs
+  const batchNodeIds = new Map(); // batch_id -> Set(discovery_node_id) -- for BATCH_ID scoping
 
   for (const row of data || []) {
-    const key = coordKey(row.latitude, row.longitude);
     const status = row.golfnow_expansion_batches?.status;
 
-    if (!batchCoords.has(row.batch_id)) batchCoords.set(row.batch_id, new Set());
-    batchCoords.get(row.batch_id).add(key);
+    if (!batchNodeIds.has(row.batch_id)) batchNodeIds.set(row.batch_id, new Set());
+    batchNodeIds.get(row.batch_id).add(row.id);
 
     if (!CLEARED_STATUSES.includes(status)) {
-      inFlight.add(key);
+      inFlightNodeIds.add(row.id);
     }
   }
 
-  return { inFlight, batchCoords };
+  return { inFlightNodeIds, batchNodeIds };
 }
 
 async function main() {
@@ -89,7 +88,7 @@ async function main() {
       (BATCH_ID ? ` (scoped to batch ${BATCH_ID})` : ""),
   );
 
-  const { inFlight, batchCoords } = await loadControllerNodeCoordinates();
+  const { inFlightNodeIds, batchNodeIds } = await loadControllerNodeOwnership();
 
   const { data: discovered, error: discoveredError } = await supabase
     .from("golfnow_discovered_facilities")
@@ -105,20 +104,23 @@ async function main() {
   let scoped = discovered || [];
 
   if (BATCH_ID) {
-    // Explicit batch scoping: only this batch's own node coordinates,
-    // regardless of what else is sitting in the discovered-facilities
-    // table. This is what makes the controller's own promotion call
-    // unable to accidentally promote an unrelated discovered facility --
-    // the exact leakage found and reported during Phase 1.
-    const allowed = batchCoords.get(BATCH_ID) || new Set();
-    scoped = scoped.filter((row) => allowed.has(coordKey(row.discovery_latitude, row.discovery_longitude)));
+    // Explicit batch scoping: only facilities a node belonging to THIS
+    // batch actually discovered (discovery_node_id, not coordinates --
+    // see golfnow_discovered_facilities_node_ownership migration). This
+    // is what makes the controller's own promotion call unable to
+    // accidentally promote an unrelated discovered facility -- the exact
+    // leakage found and reported during Phase 1.
+    const allowed = batchNodeIds.get(BATCH_ID) || new Set();
+    scoped = scoped.filter((row) => row.discovery_node_id && allowed.has(row.discovery_node_id));
   } else {
     // Unscoped (every existing scheduled/manual call): behaviour is
     // identical to before this patch, EXCEPT a discovered facility whose
-    // node belongs to a controller batch that has not yet cleared
-    // validation is excluded -- it is not this run's place to promote
-    // something the controller is still reviewing.
-    scoped = scoped.filter((row) => !inFlight.has(coordKey(row.discovery_latitude, row.discovery_longitude)));
+    // discovery_node_id belongs to a controller batch that has not yet
+    // cleared validation is excluded -- it is not this run's place to
+    // promote something the controller is still reviewing. A row with no
+    // discovery_node_id (every pre-existing row, and anything discovered
+    // by a legacy/manual node) is never excluded here.
+    scoped = scoped.filter((row) => !row.discovery_node_id || !inFlightNodeIds.has(row.discovery_node_id));
   }
 
   const { data: existing, error: existingError } = await supabase
@@ -197,4 +199,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { coordKey, isBlocked, buildTargetUrl, CLEARED_STATUSES };
+module.exports = { isBlocked, buildTargetUrl, CLEARED_STATUSES };
