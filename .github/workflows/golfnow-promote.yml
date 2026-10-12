@@ -7,6 +7,9 @@ on:
         description: "Minimum tee times needed to promote a course"
         required: false
         default: "50"
+      batch_id:
+        description: "UK Expansion Controller batch id to scope this promotion to (leave blank for the normal, unscoped promotion -- every existing use of this workflow)"
+        required: false
 
   schedule:
     - cron: '20 5 * * *'
@@ -19,6 +22,10 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       MIN_TEE_TIMES: ${{ github.event.inputs.min_tee_times || '50' }}
+      # Blank on every scheduled run and every pre-existing manual run --
+      # BATCH_ID only has a value when the UK Expansion Controller itself
+      # dispatches this workflow for one specific approved batch.
+      BATCH_ID: ${{ github.event.inputs.batch_id }}
 
     steps:
       - name: Checkout
