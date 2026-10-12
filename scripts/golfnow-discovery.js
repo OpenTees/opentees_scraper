@@ -142,7 +142,35 @@ if (dedupedRows.length) {
   if (upsertError) throw upsertError;
 }
 
- console.log(`Saved ${dedupedRows.length} discovered facilities`);
+// Durable ownership (see golfnow_facility_discovery_events migration):
+// one event per (facility, node) pairing actually seen THIS run, from
+// filteredRows -- not dedupedRows, which collapses to one row per
+// facility per run and would silently drop a second node's own claim if
+// two nodes in this same run both found the same facility. Idempotent:
+// re-discovery by a node that already has a row for this facility is a
+// harmless no-op (unique constraint + ignoreDuplicates), never an error
+// and never a second, conflicting row.
+const discoveryEvents = Array.from(
+  new Map(
+    filteredRows.map((row) => [
+      `${row.provider_course_id}:${row.discovery_node_id}`,
+      { provider_course_id: row.provider_course_id, discovery_node_id: row.discovery_node_id },
+    ])
+  ).values()
+);
+
+if (discoveryEvents.length) {
+  const { error: eventsError } = await supabase
+    .from("golfnow_facility_discovery_events")
+    .upsert(discoveryEvents, {
+      onConflict: "provider_course_id,discovery_node_id",
+      ignoreDuplicates: true,
+    });
+
+  if (eventsError) throw eventsError;
+}
+
+ console.log(`Saved ${dedupedRows.length} discovered facilities (${discoveryEvents.length} discovery event(s))`);
 
 console.table(
   dedupedRows

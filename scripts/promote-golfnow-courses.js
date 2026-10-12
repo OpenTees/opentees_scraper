@@ -13,22 +13,10 @@ const MIN_TEE_TIMES = Number(process.env.MIN_TEE_TIMES || 50);
 
 // Optional: the UK Expansion Controller sets this to scope promotion to
 // exactly one approved batch's nodes. Unset (every existing scheduled/
-// manual invocation, forever) means "promote from the whole table",
-// completely unchanged from before this file was patched.
+// manual invocation, forever) means "promote from the whole table,
+// excluding everything controller-managed" -- see the strict isolation
+// rule below, not merely the previous "unchanged" behaviour.
 const BATCH_ID = process.env.BATCH_ID || null;
-
-// Statuses where a controller-managed batch has cleared its own
-// validation/pause gate and may be promoted -- by the controller's own
-// scoped call (BATCH_ID set) or, from this point on, by the ordinary
-// unscoped cron too. Any OTHER status (approved/discovering/validating/
-// paused_for_review/failed) means the controller has not yet signed off,
-// so that batch's discovered facilities are excluded from an UNSCOPED
-// promotion run regardless of who triggers it -- this is what stops the
-// existing scheduled workflow from bypassing the controller's approval
-// boundary. A controller-scoped run (BATCH_ID set) only ever touches its
-// own batch's nodes in the first place, so this exclusion never blocks
-// the controller from promoting the batch it is actively processing.
-const CLEARED_STATUSES = ["promoting", "promoted", "completed"];
 
 const blockedNameTerms = [
   "sim room",
@@ -48,52 +36,86 @@ function isBlocked(row) {
   return blockedNameTerms.some((term) => name.includes(term));
 }
 
-// Loads every controller-managed discovery node (batch_id not null)
-// together with its batch's current status, keyed by node id -- never
-// by coordinate. Reliable batch ownership requires this: two different
-// approved batches (or a controller batch and a legacy manual node)
-// could in principle share exact coordinates, which coordinate matching
-// could not tell apart. Legacy/manual nodes (batch_id null -- every node
+// Loads every controller-managed discovery node (batch_id not null),
+// keyed by node id -- never by coordinate (two different approved
+// batches, or a controller batch and a legacy manual node, could in
+// principle share exact coordinates, which coordinate matching could
+// not tell apart). Legacy/manual nodes (batch_id null -- every node
 // that existed before the controller, plus anything added by hand in
-// future) are entirely unaffected: they were never in this set and this
-// function's result never excludes them.
-async function loadControllerNodeOwnership() {
-  const { data, error } = await supabase
+// future) are entirely unaffected: they were never in this set.
+//
+// Strict isolation (per the approved spec): ANY controller-managed node,
+// regardless of its batch's current status -- including "completed" --
+// permanently removes a facility from the unscoped promotion path. Only
+// a BATCH_ID-scoped call may ever promote a controller-managed facility.
+// There is deliberately no "cleared, so the unscoped cron may now also
+// promote it" exception: that would reopen exactly the bypass this rule
+// exists to close.
+async function loadControllerNodeOwnership(client) {
+  const { data, error } = await client
     .from("golfnow_discovery_nodes")
-    .select("id, batch_id, golfnow_expansion_batches(status)")
+    .select("id, batch_id")
     .not("batch_id", "is", null);
 
   if (error) throw error;
 
-  const inFlightNodeIds = new Set(); // not yet cleared -- exclude from unscoped runs
+  const allControllerNodeIds = new Set(); // ANY controller node, any status -- permanently excluded from unscoped
   const batchNodeIds = new Map(); // batch_id -> Set(discovery_node_id) -- for BATCH_ID scoping
 
   for (const row of data || []) {
-    const status = row.golfnow_expansion_batches?.status;
-
+    allControllerNodeIds.add(row.id);
     if (!batchNodeIds.has(row.batch_id)) batchNodeIds.set(row.batch_id, new Set());
     batchNodeIds.get(row.batch_id).add(row.id);
-
-    if (!CLEARED_STATUSES.includes(status)) {
-      inFlightNodeIds.add(row.id);
-    }
   }
 
-  return { inFlightNodeIds, batchNodeIds };
+  return { allControllerNodeIds, batchNodeIds };
 }
 
-async function main() {
-  console.log(
-    `Promoting GolfNow courses with ${MIN_TEE_TIMES}+ tee times` +
-      (BATCH_ID ? ` (scoped to batch ${BATCH_ID})` : ""),
-  );
+// Durable ownership (see golfnow_facility_discovery_events migration):
+// which node(s) have EVER discovered each provider_course_id, append-
+// only and never overwritten by a later discovery from a different
+// node. This, not golfnow_discovered_facilities.discovery_node_id (a
+// mutable "last node to touch this row" pointer), is what promotion
+// scoping reads ownership from.
+async function loadFacilityOwnership(client, providerCourseIds) {
+  const ownerNodesByProviderCourseId = new Map();
+  if (providerCourseIds.length === 0) return ownerNodesByProviderCourseId;
 
-  const { inFlightNodeIds, batchNodeIds } = await loadControllerNodeOwnership();
+  const { data, error } = await client
+    .from("golfnow_facility_discovery_events")
+    .select("provider_course_id, discovery_node_id")
+    .in("provider_course_id", providerCourseIds);
 
-  const { data: discovered, error: discoveredError } = await supabase
+  if (error) throw error;
+
+  for (const row of data || []) {
+    if (!ownerNodesByProviderCourseId.has(row.provider_course_id)) {
+      ownerNodesByProviderCourseId.set(row.provider_course_id, new Set());
+    }
+    ownerNodesByProviderCourseId.get(row.provider_course_id).add(row.discovery_node_id);
+  }
+
+  return ownerNodesByProviderCourseId;
+}
+
+function setsIntersect(a, b) {
+  for (const value of a) {
+    if (b.has(value)) return true;
+  }
+  return false;
+}
+
+// The real execution path, from a read client through to the final
+// eligible-rows-to-insert list -- everything except the insert itself.
+// Takes an injectable client so this exact function (not a
+// reimplementation) is what both main() and the test suite exercise.
+async function computeEligibleFacilities(client, { minTeeTimes, batchId }) {
+  const { allControllerNodeIds, batchNodeIds } = await loadControllerNodeOwnership(client);
+
+  const { data: discovered, error: discoveredError } = await client
     .from("golfnow_discovered_facilities")
     .select("*")
-    .gte("number_of_tee_times", MIN_TEE_TIMES)
+    .gte("number_of_tee_times", minTeeTimes)
     .not("provider_course_id", "is", null)
     .not("seo_friendly_name", "is", null)
     .not("county", "is", null)
@@ -101,29 +123,42 @@ async function main() {
 
   if (discoveredError) throw discoveredError;
 
+  const ownerNodesByProviderCourseId = await loadFacilityOwnership(
+    client,
+    (discovered || []).map((row) => row.provider_course_id),
+  );
+
   let scoped = discovered || [];
 
-  if (BATCH_ID) {
-    // Explicit batch scoping: only facilities a node belonging to THIS
-    // batch actually discovered (discovery_node_id, not coordinates --
-    // see golfnow_discovered_facilities_node_ownership migration). This
-    // is what makes the controller's own promotion call unable to
-    // accidentally promote an unrelated discovered facility -- the exact
-    // leakage found and reported during Phase 1.
-    const allowed = batchNodeIds.get(BATCH_ID) || new Set();
-    scoped = scoped.filter((row) => row.discovery_node_id && allowed.has(row.discovery_node_id));
+  if (batchId) {
+    // Explicit batch scoping: only facilities with a durable discovery
+    // event from a node belonging to THIS batch (never coordinates, and
+    // never the mutable discovery_node_id column -- see
+    // golfnow_facility_discovery_events). This is what makes the
+    // controller's own promotion call unable to accidentally promote an
+    // unrelated discovered facility -- the exact leakage found and
+    // reported during Phase 1.
+    const allowed = batchNodeIds.get(batchId) || new Set();
+    scoped = scoped.filter((row) => {
+      const owners = ownerNodesByProviderCourseId.get(row.provider_course_id);
+      return owners != null && setsIntersect(owners, allowed);
+    });
   } else {
-    // Unscoped (every existing scheduled/manual call): behaviour is
-    // identical to before this patch, EXCEPT a discovered facility whose
-    // discovery_node_id belongs to a controller batch that has not yet
-    // cleared validation is excluded -- it is not this run's place to
-    // promote something the controller is still reviewing. A row with no
-    // discovery_node_id (every pre-existing row, and anything discovered
-    // by a legacy/manual node) is never excluded here.
-    scoped = scoped.filter((row) => !row.discovery_node_id || !inFlightNodeIds.has(row.discovery_node_id));
+    // Unscoped (every existing scheduled/manual call): strict,
+    // permanent isolation. A facility with a durable discovery event
+    // from ANY controller-managed node -- regardless of that node's
+    // batch status, including "completed" -- is excluded here, full
+    // stop. Only a BATCH_ID-scoped call may ever promote it. A facility
+    // never discovered by a controller node (every pre-existing row,
+    // and anything only ever discovered by a legacy/manual node) is
+    // never excluded here, exactly as before this feature existed.
+    scoped = scoped.filter((row) => {
+      const owners = ownerNodesByProviderCourseId.get(row.provider_course_id);
+      return owners == null || !setsIntersect(owners, allControllerNodeIds);
+    });
   }
 
-  const { data: existing, error: existingError } = await supabase
+  const { data: existing, error: existingError } = await client
   .from("courses")
   .select("course_name, provider_course_id")
   .not("course_name", "is", null);
@@ -143,7 +178,7 @@ const existingNames = new Set(
     .filter(Boolean)
 );
 
-  const eligible = scoped.filter((row) => {
+  return scoped.filter((row) => {
     const providerCourseId = String(row.provider_course_id || "");
 
     if (!providerCourseId) return false;
@@ -155,6 +190,15 @@ if (existingNames.has(courseName)) return false;
 
     return true;
   });
+}
+
+async function main() {
+  console.log(
+    `Promoting GolfNow courses with ${MIN_TEE_TIMES}+ tee times` +
+      (BATCH_ID ? ` (scoped to batch ${BATCH_ID})` : ""),
+  );
+
+  const eligible = await computeEligibleFacilities(supabase, { minTeeTimes: MIN_TEE_TIMES, batchId: BATCH_ID });
 
   const rows = eligible.map((row) => ({
     course_name: row.course_name,
@@ -199,4 +243,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { isBlocked, buildTargetUrl, CLEARED_STATUSES };
+module.exports = {
+  isBlocked,
+  buildTargetUrl,
+  setsIntersect,
+  loadControllerNodeOwnership,
+  loadFacilityOwnership,
+  computeEligibleFacilities,
+};

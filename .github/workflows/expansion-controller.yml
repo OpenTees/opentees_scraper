@@ -1,0 +1,66 @@
+name: UK Expansion Controller
+
+# Permissions and scheduling for the controller's state-machine tick.
+# Safety does NOT depend on this file: expansion_controller_config
+# .automation_enabled defaults to false in production, checked first by
+# the script itself before anything else runs, and runLive()'s actual
+# stage-dispatch wiring is not yet connected (see expansion-controller.js's
+# own header) -- so every run of this workflow is a no-op today
+# regardless of the config flag. This file exists so scheduling,
+# permissions and concurrency protection are already correct and tested
+# for when that wiring is completed and reviewed.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 30 minutes. A single tick advances at most one batch by one
+    # stage -- frequent enough that a multi-stage batch completes within
+    # a reasonable time, infrequent enough to stay well clear of the
+    # golfnow-discovery (05:00 UTC) / golfnow-promote (05:20 UTC) /
+    # golfnow-import (07:35, 13:35 UTC) schedules it coordinates with.
+    - cron: '*/30 * * * *'
+
+# actions: write is the only elevated permission this workflow needs --
+# it lets the controller dispatch golfnow-discovery.yml/golfnow-promote
+# .yml and read their run status/artifacts via the default GITHUB_TOKEN,
+# same-repo only. No new secret, no cross-repo scope, no write access
+# beyond triggering workflows that already exist.
+permissions:
+  actions: write
+  contents: read
+
+# Concurrency protection: GitHub Actions never runs two instances of
+# this workflow at once -- a tick already in progress (e.g. one stuck
+# waiting on a slow GitHub API call) is left to finish rather than
+# cancelled, and a new scheduled tick that would overlap it is queued
+# behind it instead of starting in parallel. This is what makes "two
+# controller ticks racing to advance the same batch" structurally
+# impossible, independent of anything the script itself checks.
+concurrency:
+  group: uk-expansion-controller
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install @supabase/supabase-js
+
+      - name: Run controller tick
+        run: node scripts/expansion-controller.js
