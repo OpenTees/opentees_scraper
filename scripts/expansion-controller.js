@@ -266,10 +266,99 @@ async function recordRun(supabase, { batchId, correlationId, stage, status, deta
     correlation_id: correlationId,
     stage,
     status,
+    started_at: new Date().toISOString(),
     completed_at: status === "started" ? null : new Date().toISOString(),
     details: details || {},
   });
   if (error) throw new Error(`Unable to record expansion run: ${error.message}`);
+}
+
+// ---------------------------------------------------------------------
+// Crash-safe workflow dispatch (PR #2 correction: "do not assume the
+// current post-dispatch insert is crash-safe"). A durable "dispatch
+// intent" row is written BEFORE the GitHub API call, not after -- so a
+// crash between the API call succeeding and the DB write is recovered
+// by reconciliation on the next tick, rather than silently forgotten
+// (which could otherwise double-dispatch, or leave the batch stuck with
+// no record that anything was ever attempted).
+//
+// Used for the two dispatches that happen at most once per batch
+// lifetime (initial discovery, promotion) -- keyed by (batchId, stage)
+// alone, matching the single-attempt restart-guard this replaces.
+// ---------------------------------------------------------------------
+
+const DISPATCH_RECONCILE_WINDOW_MS = 2 * 60 * 1000;
+
+async function recordDispatchIntent(supabase, { batchId, correlationId, stage }) {
+  const { data, error } = await supabase
+    .from("golfnow_expansion_runs")
+    .insert({
+      batch_id: batchId,
+      correlation_id: correlationId,
+      stage,
+      status: "dispatch_pending",
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      details: {},
+    })
+    .select("*")
+    .single();
+  if (error) throw new Error(`Unable to record dispatch intent: ${error.message}`);
+  return data;
+}
+
+async function confirmDispatch(supabase, runRowId, githubRunId, extraDetails = {}) {
+  const { error } = await supabase
+    .from("golfnow_expansion_runs")
+    .update({
+      status: "started",
+      details: { github_run_id: githubRunId, dispatched_at: new Date().toISOString(), ...extraDetails },
+    })
+    .eq("id", runRowId);
+  if (error) throw new Error(`Unable to confirm dispatch: ${error.message}`);
+}
+
+// Returns { runId, isNew, reconciled?, settling? }. `settling: true`
+// means a previous intent might still be in flight at GitHub -- the
+// caller must leave the batch's status untouched and let the next tick
+// re-check, rather than dispatch a possible duplicate.
+async function dispatchDurable(supabase, gh, { batchId, correlationId, stage, workflowFile, inputs, extraDetails }) {
+  const existing = await latestRun(supabase, batchId, stage);
+
+  if (existing && existing.status === "started" && existing.details?.github_run_id) {
+    return { runId: existing.details.github_run_id, isNew: false };
+  }
+
+  let intent = existing && existing.status === "dispatch_pending" ? existing : null;
+
+  if (intent) {
+    // An earlier tick recorded intent to dispatch but crashed before
+    // (or while) confirming the result. Reconcile against GitHub's own
+    // run list rather than assuming either "it never happened" or "it
+    // must have happened".
+    const runs = await gh.listRecentRuns(workflowFile, 10);
+    const match = runs.find((r) => r.created_at >= intent.started_at);
+    if (match) {
+      await confirmDispatch(supabase, intent.id, match.id, extraDetails);
+      return { runId: match.id, isNew: false, reconciled: true };
+    }
+
+    const elapsedMs = Date.now() - new Date(intent.started_at).getTime();
+    if (elapsedMs < DISPATCH_RECONCILE_WINDOW_MS) {
+      // Too soon to tell whether the original API call reached GitHub
+      // yet -- wait for it to show up rather than risk a duplicate.
+      return { runId: null, isNew: false, settling: true };
+    }
+    // No matching run after a safe reconciliation window: the original
+    // dispatch attempt never reached GitHub. Reuse the same intent row
+    // rather than recording a second one.
+  } else {
+    intent = await recordDispatchIntent(supabase, { batchId, correlationId, stage });
+  }
+
+  const runId = await gh.dispatchWorkflow(workflowFile, inputs);
+  await confirmDispatch(supabase, intent.id, runId, extraDetails);
+  return { runId, isNew: true };
 }
 
 async function latestRun(supabase, batchId, stage) {
@@ -340,9 +429,17 @@ async function startDiscovery(supabase, gh, batch, correlationId, maxBatchSize) 
 
   // Idempotent: a node that already has a discovery_node_id was
   // already inserted into the live table by an earlier, possibly
-  // crashed tick -- never inserted a second time.
+  // crashed tick -- never inserted a second time. Collect every node's
+  // live id as we go: this is what lets the dispatch below scope
+  // discovery to EXACTLY this batch's nodes, by id, rather than relying
+  // on golfnow_discovery_nodes' last_run_at ordering + a bare count
+  // (which a concurrent legacy node's own last_run_at could disturb).
+  const nodeIds = [];
   for (const node of nodes) {
-    if (node.discovery_node_id) continue;
+    if (node.discovery_node_id) {
+      nodeIds.push(node.discovery_node_id);
+      continue;
+    }
     const { data: inserted, error: insertError } = await supabase
       .from("golfnow_discovery_nodes")
       .insert({
@@ -356,6 +453,7 @@ async function startDiscovery(supabase, gh, batch, correlationId, maxBatchSize) 
       .select("id")
       .single();
     if (insertError) throw new Error(`Unable to insert discovery node ${node.node_name}: ${insertError.message}`);
+    nodeIds.push(inserted.id);
 
     const { error: updateError } = await supabase
       .from("golfnow_expansion_batch_nodes")
@@ -364,28 +462,21 @@ async function startDiscovery(supabase, gh, batch, correlationId, maxBatchSize) 
     if (updateError) throw new Error(`Unable to update batch node ${node.node_name}: ${updateError.message}`);
   }
 
-  // Restart safety: if an earlier tick already dispatched discovery for
-  // this batch (recorded a "started" run with a github_run_id) but
-  // crashed before the batch status flip below, do not dispatch a
-  // second time -- just advance the status and let the next tick's
-  // checkDiscoveryProgress pick up the already-recorded run.
-  const existing = await latestRun(supabase, batch.id, "discovery");
-  if (existing && existing.status === "started" && existing.details?.github_run_id) {
-    await setBatchStatus(supabase, batch, "discovering");
-    return;
-  }
-
-  const dispatchedAt = new Date().toISOString();
-  const runId = await gh.dispatchWorkflow(WORKFLOW_DISCOVERY, { limit_nodes: String(nodes.length) });
-
-  await setBatchStatus(supabase, batch, "discovering");
-  await recordRun(supabase, {
+  // Crash-safe dispatch (see dispatchDurable): writes a durable intent
+  // before calling GitHub, and reconciles against GitHub's own run list
+  // on a restart rather than assuming the post-dispatch insert landed.
+  const { settling } = await dispatchDurable(supabase, gh, {
     batchId: batch.id,
     correlationId,
     stage: "discovery",
-    status: "started",
-    details: { github_run_id: runId, dispatched_at: dispatchedAt, node_count: nodes.length },
+    workflowFile: WORKFLOW_DISCOVERY,
+    inputs: { node_ids: nodeIds.join(",") },
+    extraDetails: { node_count: nodeIds.length },
   });
+
+  if (settling) return; // too soon to tell if the earlier attempt reached GitHub -- re-check next tick
+
+  await setBatchStatus(supabase, batch, "discovering");
 }
 
 // discovering -> validating (or retry / fail): poll the dispatched run;
@@ -491,15 +582,22 @@ async function checkDiscoveryProgress(supabase, gh, batch, correlationId, maxRet
   const stillPending = refreshedNodes.some((n) => n.status === "pending" || n.status === "discovering");
   if (stillPending) {
     if (anyRetried) {
-      const pendingCount = refreshedNodes.filter((n) => n.status === "pending").length;
+      // Explicit node-ID scoping (same rule as the initial dispatch):
+      // re-run discovery for EXACTLY the nodes being retried, by id --
+      // never a bare count, which would depend on last_run_at ordering
+      // among whatever else happens to be enabled at the time.
+      const pendingNodeIds = refreshedNodes
+        .filter((n) => n.status === "pending")
+        .map((n) => n.discovery_node_id)
+        .filter(Boolean);
       const retryDispatchedAt = new Date().toISOString();
-      const retryRunId = await gh.dispatchWorkflow(WORKFLOW_DISCOVERY, { limit_nodes: String(pendingCount) });
+      const retryRunId = await gh.dispatchWorkflow(WORKFLOW_DISCOVERY, { node_ids: pendingNodeIds.join(",") });
       await recordRun(supabase, {
         batchId: batch.id,
         correlationId,
         stage: "discovery",
         status: "started",
-        details: { github_run_id: retryRunId, dispatched_at: retryDispatchedAt, retry: true, node_count: pendingCount },
+        details: { github_run_id: retryRunId, dispatched_at: retryDispatchedAt, retry: true, node_count: pendingNodeIds.length },
       });
     }
     return;
@@ -602,29 +700,20 @@ async function runValidation(supabase, gh, batch, correlationId) {
   // which per the strict isolation rule can never promote a
   // controller-managed facility regardless of status.
   //
-  // Restart safety: if an earlier tick already dispatched promotion
-  // for this batch but crashed before the status flip below, do not
-  // dispatch a second time.
-  const existingPromotionRun = await latestRun(supabase, batch.id, "promotion");
-  if (existingPromotionRun && existingPromotionRun.status === "started" && existingPromotionRun.details?.github_run_id) {
-    await setBatchStatus(supabase, batch, "promoting");
-    return;
-  }
-
-  const dispatchedAt = new Date().toISOString();
-  const runId = await gh.dispatchWorkflow(WORKFLOW_PROMOTE, {
-    min_tee_times: String(batch.min_tee_times),
-    batch_id: batch.id,
-  });
-
-  await setBatchStatus(supabase, batch, "promoting");
-  await recordRun(supabase, {
+  // Crash-safe dispatch (see dispatchDurable): writes a durable intent
+  // before calling GitHub, and reconciles against GitHub's own run list
+  // on a restart rather than assuming the post-dispatch insert landed.
+  const { settling } = await dispatchDurable(supabase, gh, {
     batchId: batch.id,
     correlationId,
     stage: "promotion",
-    status: "started",
-    details: { github_run_id: runId, dispatched_at: dispatchedAt },
+    workflowFile: WORKFLOW_PROMOTE,
+    inputs: { min_tee_times: String(batch.min_tee_times), batch_id: batch.id },
   });
+
+  if (settling) return; // too soon to tell if the earlier attempt reached GitHub -- re-check next tick
+
+  await setBatchStatus(supabase, batch, "promoting");
 }
 
 // promoting: poll the dispatched promote run; once complete, verify
@@ -707,22 +796,42 @@ async function checkPromotionProgress(supabase, gh, batch, correlationId) {
 
 // promoted -> verifying: wait for the NEXT normally-scheduled
 // golfnow-import run (never triggered early by the controller) to have
-// completed after promoted_at.
-async function checkForNextImport(supabase, gh, batch) {
+// completed after promoted_at, and PIN its exact run id the moment
+// it's first confirmed -- a durable "import_verification"/"started"
+// run row, mirroring how discovery/promotion pin their own
+// github_run_id. Every later verification step reads that pinned id;
+// none of them re-search recent runs, so a second run that happens to
+// also qualify (completed, after promoted_at) can never be silently
+// substituted for the one actually confirmed here.
+async function checkForNextImport(supabase, gh, batch, correlationId) {
+  const alreadyPinned = await latestRun(supabase, batch.id, "import_verification");
+  if (alreadyPinned && alreadyPinned.details?.github_run_id) {
+    await setBatchStatus(supabase, batch, "verifying");
+    return;
+  }
+
   const runs = await gh.listRecentRuns(WORKFLOW_IMPORT, 10);
   const completedSince = runs.find((r) => r.status === "completed" && r.created_at >= batch.promoted_at);
   if (!completedSince) {
     console.log("No completed golfnow-import run since promotion yet; waiting for the normal schedule");
     return;
   }
+
+  await recordRun(supabase, {
+    batchId: batch.id,
+    correlationId,
+    stage: "import_verification",
+    status: "started",
+    details: { github_run_id: completedSince.id },
+  });
   await setBatchStatus(supabase, batch, "verifying");
 }
 
-// verifying -> completed: read that import run's own summary.json and
-// classify every course this batch promoted (the exact list recorded
-// by checkPromotionProgress, not re-derived) as has_inventory /
-// no_availability / scraper_failure -- never inferred from the
-// workflow's exit status alone.
+// verifying -> completed: read the PINNED import run's own summary.json
+// (never a freshly re-searched run) and classify every course this
+// batch promoted (the exact list recorded by checkPromotionProgress,
+// not re-derived) as has_inventory / no_availability / scraper_failure
+// -- never inferred from the workflow's exit status alone.
 async function runVerification(supabase, gh, batch, correlationId) {
   const promotionRun = await latestRun(supabase, batch.id, "promotion");
   const courseNames = promotionRun?.details?.course_names;
@@ -731,16 +840,16 @@ async function runVerification(supabase, gh, batch, correlationId) {
     return;
   }
 
-  const runs = await gh.listRecentRuns(WORKFLOW_IMPORT, 10);
-  const importRun = runs.find((r) => r.status === "completed" && r.created_at >= batch.promoted_at);
-  if (!importRun) {
-    console.log("Import run no longer found; will re-check next tick");
+  const pinnedRun = await latestRun(supabase, batch.id, "import_verification");
+  const importRunId = pinnedRun?.details?.github_run_id;
+  if (!importRunId) {
+    await pauseBatch(supabase, batch, "No pinned import run recorded from the promoted->verifying transition -- manual review needed");
     return;
   }
 
-  const summary = await gh.downloadSummaryArtifact(importRun.id);
+  const summary = await gh.downloadSummaryArtifact(importRunId);
   if (!summary) {
-    await pauseBatch(supabase, batch, `Could not read summary.json from import run ${importRun.id}`);
+    await pauseBatch(supabase, batch, `Could not read summary.json from import run ${importRunId}`);
     return;
   }
 
@@ -751,7 +860,7 @@ async function runVerification(supabase, gh, batch, correlationId) {
     correlationId,
     stage: "import_verification",
     status: classification.failureCount > 0 ? "paused" : "succeeded",
-    details: classification,
+    details: { ...classification, github_run_id: importRunId },
   });
 
   if (classification.failureCount > 0) {
@@ -802,7 +911,7 @@ async function runTick(supabase, gh, correlationId = (globalThis.crypto || requi
       await checkPromotionProgress(supabase, gh, batch, correlationId);
       break;
     case "promoted":
-      await checkForNextImport(supabase, gh, batch);
+      await checkForNextImport(supabase, gh, batch, correlationId);
       break;
     case "verifying":
       await runVerification(supabase, gh, batch, correlationId);

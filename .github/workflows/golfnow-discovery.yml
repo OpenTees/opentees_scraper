@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       limit_nodes:
-        description: "Number of discovery nodes to run"
+        description: "Number of discovery nodes to run (ignored when node_ids is set)"
         required: false
         default: "8"
+      node_ids:
+        description: "Comma-separated exact discovery node IDs to run (overrides limit_nodes/ordering; leave blank for normal scheduled behaviour)"
+        required: false
+        default: ""
 
   schedule:
     - cron: '0 5 * * *'
@@ -19,6 +23,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       LIMIT_NODES: ${{ github.event.inputs.limit_nodes }}
+      NODE_IDS: ${{ github.event.inputs.node_ids }}
 
     steps:
       - name: Checkout

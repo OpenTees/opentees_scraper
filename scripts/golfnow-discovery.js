@@ -9,15 +9,37 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     enabled: false,
   },
 });
+// Optional: the UK Expansion Controller sets this to a comma-separated
+// list of exact golfnow_discovery_nodes.id values to scope a run to --
+// e.g. one approved batch's nodes, or a specific node being retried.
+// When set, this is the ONLY thing that determines which nodes run:
+// no last_run_at ordering, no LIMIT_NODES, so a concurrent legacy node
+// whose last_run_at happens to be older can never be picked up by
+// mistake and a requested node is never silently dropped because
+// something else sorted ahead of it. When unset (every existing
+// scheduled/manual invocation, forever), behaviour is unchanged: the
+// oldest-run-first N enabled nodes, as before this feature existed.
+const NODE_IDS = (process.env.NODE_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+
 async function main() {
-  const { data: nodes, error } = await supabase
-    .from("golfnow_discovery_nodes")
-    .select("*")
-    .eq("enabled", true)
-    .order("last_run_at", { ascending: true, nullsFirst: true })
-    .limit(Number(process.env.LIMIT_NODES || 3));
+  let query = supabase.from("golfnow_discovery_nodes").select("*").eq("enabled", true);
+
+  query = NODE_IDS.length
+    ? query.in("id", NODE_IDS)
+    : query.order("last_run_at", { ascending: true, nullsFirst: true }).limit(Number(process.env.LIMIT_NODES || 3));
+
+  const { data: nodes, error } = await query;
 
   if (error) throw error;
+
+  if (NODE_IDS.length && (nodes || []).length !== NODE_IDS.length) {
+    const found = new Set((nodes || []).map((n) => n.id));
+    const missing = NODE_IDS.filter((id) => !found.has(id));
+    console.warn(`Requested node id(s) not found or not enabled: ${missing.join(", ")}`);
+  }
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
