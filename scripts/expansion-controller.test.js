@@ -6,6 +6,8 @@ const {
   evaluateValidation,
   shouldRetryNode,
   classifyImportResults,
+  findRunMatchingToken,
+  retryAttemptKey,
 } = require("./expansion-controller");
 
 // --- decideTick ---------------------------------------------------------
@@ -183,4 +185,55 @@ test("evaluateValidation: zero leakage passes even when discoveredByNode reflect
   ]);
   const result = evaluateValidation(nodes, discoveredByNode);
   assert.equal(result.pass, true);
+});
+
+// --- findRunMatchingToken (defect 3: identity, never creation time) ----
+
+test("findRunMatchingToken: matches a run whose display_title embeds the exact token", () => {
+  const runs = [
+    { id: 1, display_title: "GolfNow Discovery" },
+    { id: 2, display_title: "GolfNow Discovery [ctrl:abc-123]" },
+  ];
+  const match = findRunMatchingToken(runs, "abc-123");
+  assert.equal(match.id, 2);
+});
+
+test("findRunMatchingToken: an unrelated scheduled/manual run (no token in its title) is never adopted, no matter when it was created", () => {
+  const runs = [
+    { id: 1, display_title: "GolfNow Discovery", created_at: "2026-10-12T23:59:59Z" }, // created well after dispatch
+  ];
+  const match = findRunMatchingToken(runs, "abc-123");
+  assert.equal(match, null);
+});
+
+test("findRunMatchingToken: a different token's run is never mistaken for this one", () => {
+  const runs = [{ id: 1, display_title: "GolfNow Discovery [ctrl:other-token]" }];
+  const match = findRunMatchingToken(runs, "abc-123");
+  assert.equal(match, null);
+});
+
+test("findRunMatchingToken: no token to match against returns null rather than guessing", () => {
+  const runs = [{ id: 1, display_title: "GolfNow Discovery [ctrl:abc-123]" }];
+  assert.equal(findRunMatchingToken(runs, undefined), null);
+  assert.equal(findRunMatchingToken(runs, null), null);
+});
+
+// --- retryAttemptKey (defect 2: a stable, distinct identity per wave) --
+
+test("retryAttemptKey: is stable for the same set of nodes at the same retry_count, regardless of input order", () => {
+  const waveA = [{ id: "bn-1", retry_count: 1 }, { id: "bn-2", retry_count: 1 }];
+  const waveAReordered = [{ id: "bn-2", retry_count: 1 }, { id: "bn-1", retry_count: 1 }];
+  assert.equal(retryAttemptKey(waveA), retryAttemptKey(waveAReordered));
+});
+
+test("retryAttemptKey: a later wave for the SAME node at a higher retry_count gets a distinct key -- never confused with the earlier wave", () => {
+  const waveOne = [{ id: "bn-1", retry_count: 1 }];
+  const waveTwo = [{ id: "bn-1", retry_count: 2 }];
+  assert.notEqual(retryAttemptKey(waveOne), retryAttemptKey(waveTwo));
+});
+
+test("retryAttemptKey: a different node set at the same retry_count also gets a distinct key", () => {
+  const waveA = [{ id: "bn-1", retry_count: 1 }];
+  const waveB = [{ id: "bn-1", retry_count: 1 }, { id: "bn-2", retry_count: 1 }];
+  assert.notEqual(retryAttemptKey(waveA), retryAttemptKey(waveB));
 });

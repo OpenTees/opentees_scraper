@@ -168,6 +168,8 @@ module.exports = {
   evaluateValidation,
   shouldRetryNode,
   classifyImportResults,
+  findRunMatchingToken,
+  retryAttemptKey,
   buildGithubClient,
   startDiscovery,
   checkDiscoveryProgress,
@@ -183,6 +185,20 @@ module.exports = {
 // below can be driven by a mock in tests. The real fetch() calls live
 // only here.
 // ---------------------------------------------------------------------
+
+// Pure: reliably associate a GitHub workflow run with a specific
+// controller dispatch by IDENTITY (the dispatch_token embedded in that
+// run's own run-name -- see golfnow-discovery.yml/golfnow-promote.yml's
+// `run-name:` line), never by creation time alone. Creation time can
+// match an unrelated scheduled run, or a run a human happened to
+// trigger manually around the same moment; identity can't. Returns
+// null (never a guess) when no run carries this exact token yet.
+function findRunMatchingToken(runs, token) {
+  if (!token) return null;
+  return (runs || []).find(
+    (r) => typeof r.display_title === "string" && r.display_title.includes(`[ctrl:${token}]`),
+  ) || null;
+}
 
 function buildGithubClient({ token, repository }) {
   const [owner, repo] = repository.split("/");
@@ -203,21 +219,24 @@ function buildGithubClient({ token, repository }) {
   }
 
   return {
+    // inputs.dispatch_token (set by dispatchDurable) is what makes the
+    // run this creates identifiable afterwards -- see
+    // findRunMatchingToken. If GitHub hasn't indexed the new run by the
+    // time this short poll gives up, this returns null rather than
+    // guessing or throwing: the caller's durable reconciliation (same
+    // token, same findRunMatchingToken) picks it up on a later tick.
     async dispatchWorkflow(workflowFile, inputs) {
-      const dispatchedAt = new Date().toISOString();
       await gh(`/actions/workflows/${workflowFile}/dispatches`, {
         method: "POST",
         body: JSON.stringify({ ref: "main", inputs }),
       });
-      // workflow_dispatch returns no run id -- find it the same way a
-      // human operator would, by listing runs created after dispatch.
       for (let attempt = 0; attempt < 6; attempt += 1) {
         await new Promise((r) => setTimeout(r, 5000));
-        const runs = await gh(`/actions/workflows/${workflowFile}/runs?per_page=5`);
-        const match = (runs.workflow_runs || []).find((r) => r.created_at >= dispatchedAt);
+        const runs = await gh(`/actions/workflows/${workflowFile}/runs?per_page=10`);
+        const match = findRunMatchingToken(runs.workflow_runs, inputs.dispatch_token);
         if (match) return match.id;
       }
-      throw new Error(`Could not locate the dispatched run for ${workflowFile}`);
+      return null;
     },
 
     async getRun(runId) {
@@ -276,20 +295,57 @@ async function recordRun(supabase, { batchId, correlationId, stage, status, deta
 // ---------------------------------------------------------------------
 // Crash-safe workflow dispatch (PR #2 correction: "do not assume the
 // current post-dispatch insert is crash-safe"). A durable "dispatch
-// intent" row is written BEFORE the GitHub API call, not after -- so a
-// crash between the API call succeeding and the DB write is recovered
-// by reconciliation on the next tick, rather than silently forgotten
-// (which could otherwise double-dispatch, or leave the batch stuck with
-// no record that anything was ever attempted).
+// intent" row -- carrying a unique dispatch_token -- is written BEFORE
+// the GitHub API call, not after, so a crash between the API call
+// succeeding and the DB write is recovered by reconciliation on the
+// next tick, rather than silently forgotten (which could otherwise
+// double-dispatch, or leave the batch stuck with no record that
+// anything was ever attempted).
 //
-// Used for the two dispatches that happen at most once per batch
-// lifetime (initial discovery, promotion) -- keyed by (batchId, stage)
-// alone, matching the single-attempt restart-guard this replaces.
+// Reconciliation matches by that token -- embedded in the dispatched
+// run's own run-name (see findRunMatchingToken) -- never by creation
+// time alone, which could adopt an unrelated scheduled or manually
+// triggered run. If identity can't yet be established, the caller is
+// told to wait (`settling: true`), never to guess.
+//
+// `attemptKey` (default "primary") scopes this to one specific dispatch
+// attempt, durable across a restart of that SAME attempt, but distinct
+// from any other attempt under the same (batchId, stage) -- e.g. the
+// one-shot initial discovery/promotion dispatch ("primary"), or one
+// specific discovery-retry wave (see retryAttemptKey). Without this,
+// a second, genuinely new retry wave could be mistaken for an earlier
+// one still settling, or vice versa.
 // ---------------------------------------------------------------------
 
 const DISPATCH_RECONCILE_WINDOW_MS = 2 * 60 * 1000;
 
-async function recordDispatchIntent(supabase, { batchId, correlationId, stage }) {
+async function recentRunsForStage(supabase, batchId, stage, limit) {
+  const { data, error } = await supabase
+    .from("golfnow_expansion_runs")
+    .select("*")
+    .eq("batch_id", batchId)
+    .eq("stage", stage)
+    .order("started_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`Unable to read expansion runs: ${error.message}`);
+  return data || [];
+}
+
+// Pure: a deterministic, durable identity for one discovery-retry wave,
+// derived only from exactly which nodes are retrying and at exactly
+// which retry_count -- both already committed to the database before
+// this is ever called. Stable across a crash-restart of the SAME wave
+// (nothing re-increments retry_count for an already-"pending" node);
+// distinct from any other wave (a different node set and/or a higher
+// retry_count changes the key).
+function retryAttemptKey(pendingNodes) {
+  return pendingNodes
+    .map((n) => `${n.id}:${n.retry_count}`)
+    .sort()
+    .join(",");
+}
+
+async function recordDispatchIntent(supabase, { batchId, correlationId, stage, attemptKey, token }) {
   const { data, error } = await supabase
     .from("golfnow_expansion_runs")
     .insert({
@@ -299,7 +355,7 @@ async function recordDispatchIntent(supabase, { batchId, correlationId, stage })
       status: "dispatch_pending",
       started_at: new Date().toISOString(),
       completed_at: null,
-      details: {},
+      details: { attempt_key: attemptKey, dispatch_token: token },
     })
     .select("*")
     .single();
@@ -308,38 +364,49 @@ async function recordDispatchIntent(supabase, { batchId, correlationId, stage })
 }
 
 async function confirmDispatch(supabase, runRowId, githubRunId, extraDetails = {}) {
+  const { data: row, error: readError } = await supabase
+    .from("golfnow_expansion_runs")
+    .select("*")
+    .eq("id", runRowId)
+    .single();
+  if (readError) throw new Error(`Unable to read dispatch intent: ${readError.message}`);
+
   const { error } = await supabase
     .from("golfnow_expansion_runs")
     .update({
       status: "started",
-      details: { github_run_id: githubRunId, dispatched_at: new Date().toISOString(), ...extraDetails },
+      details: { ...row.details, ...extraDetails, github_run_id: githubRunId, dispatched_at: new Date().toISOString() },
     })
     .eq("id", runRowId);
   if (error) throw new Error(`Unable to confirm dispatch: ${error.message}`);
 }
 
 // Returns { runId, isNew, reconciled?, settling? }. `settling: true`
-// means a previous intent might still be in flight at GitHub -- the
-// caller must leave the batch's status untouched and let the next tick
-// re-check, rather than dispatch a possible duplicate.
-async function dispatchDurable(supabase, gh, { batchId, correlationId, stage, workflowFile, inputs, extraDetails }) {
-  const existing = await latestRun(supabase, batchId, stage);
+// means identity for a previous intent can't yet be established -- the
+// caller must leave the batch/node state untouched and let the next
+// tick re-check, rather than dispatch a possible duplicate or adopt an
+// unrelated run.
+async function dispatchDurable(supabase, gh, { batchId, correlationId, stage, attemptKey = "primary", workflowFile, inputs }) {
+  const candidates = await recentRunsForStage(supabase, batchId, stage, 10);
+  const mine = candidates.filter((r) => (r.details?.attempt_key || "primary") === attemptKey);
 
-  if (existing && existing.status === "started" && existing.details?.github_run_id) {
-    return { runId: existing.details.github_run_id, isNew: false };
+  const confirmed = mine.find((r) => r.status === "started" && r.details?.github_run_id);
+  if (confirmed) {
+    return { runId: confirmed.details.github_run_id, isNew: false };
   }
 
-  let intent = existing && existing.status === "dispatch_pending" ? existing : null;
+  let intent = mine.find((r) => r.status === "dispatch_pending") || null;
 
   if (intent) {
     // An earlier tick recorded intent to dispatch but crashed before
-    // (or while) confirming the result. Reconcile against GitHub's own
-    // run list rather than assuming either "it never happened" or "it
-    // must have happened".
-    const runs = await gh.listRecentRuns(workflowFile, 10);
-    const match = runs.find((r) => r.created_at >= intent.started_at);
+    // (or while) confirming the result. Reconcile by the durable token
+    // this exact intent carries -- never by creation time, which could
+    // adopt an unrelated scheduled or manually triggered run.
+    const token = intent.details?.dispatch_token;
+    const runs = await gh.listRecentRuns(workflowFile, 20);
+    const match = findRunMatchingToken(runs, token);
     if (match) {
-      await confirmDispatch(supabase, intent.id, match.id, extraDetails);
+      await confirmDispatch(supabase, intent.id, match.id);
       return { runId: match.id, isNew: false, reconciled: true };
     }
 
@@ -349,15 +416,26 @@ async function dispatchDurable(supabase, gh, { batchId, correlationId, stage, wo
       // yet -- wait for it to show up rather than risk a duplicate.
       return { runId: null, isNew: false, settling: true };
     }
-    // No matching run after a safe reconciliation window: the original
-    // dispatch attempt never reached GitHub. Reuse the same intent row
-    // rather than recording a second one.
+    // No run carries this token after a safe reconciliation window:
+    // the original dispatch attempt never reached GitHub. Reuse the
+    // same intent row (and its token) rather than recording a second
+    // one or adopting whatever run happens to exist.
   } else {
-    intent = await recordDispatchIntent(supabase, { batchId, correlationId, stage });
+    const token = (globalThis.crypto || require("node:crypto")).randomUUID();
+    intent = await recordDispatchIntent(supabase, { batchId, correlationId, stage, attemptKey, token });
   }
 
-  const runId = await gh.dispatchWorkflow(workflowFile, inputs);
-  await confirmDispatch(supabase, intent.id, runId, extraDetails);
+  const token = intent.details.dispatch_token;
+  const runId = await gh.dispatchWorkflow(workflowFile, { ...inputs, dispatch_token: token });
+  if (!runId) {
+    // Dispatched, but this tick's own short poll couldn't yet establish
+    // which run is ours. Leave the intent pending rather than guess --
+    // the next tick's reconciliation (same token) will find it once
+    // GitHub has indexed it.
+    return { runId: null, isNew: false, settling: true };
+  }
+
+  await confirmDispatch(supabase, intent.id, runId);
   return { runId, isNew: true };
 }
 
@@ -469,9 +547,9 @@ async function startDiscovery(supabase, gh, batch, correlationId, maxBatchSize) 
     batchId: batch.id,
     correlationId,
     stage: "discovery",
+    attemptKey: "primary",
     workflowFile: WORKFLOW_DISCOVERY,
     inputs: { node_ids: nodeIds.join(",") },
-    extraDetails: { node_count: nodeIds.length },
   });
 
   if (settling) return; // too soon to tell if the earlier attempt reached GitHub -- re-check next tick
@@ -484,8 +562,19 @@ async function startDiscovery(supabase, gh, batch, correlationId, maxBatchSize) 
 // never trust "the workflow succeeded" alone.
 async function checkDiscoveryProgress(supabase, gh, batch, correlationId, maxRetries) {
   const run = await latestRun(supabase, batch.id, "discovery");
-  const githubRunId = run?.details?.github_run_id;
-  const dispatchedAt = run?.details?.dispatched_at;
+  if (!run) {
+    await pauseBatch(supabase, batch, "Discovering state with no recorded dispatch -- manual review needed");
+    return;
+  }
+  if (run.status === "dispatch_pending") {
+    // A dispatch (initial or a retry wave) is still settling -- see
+    // dispatchDurable. Never pause or guess here; just wait.
+    console.log("Discovery dispatch still settling; will re-check next tick");
+    return;
+  }
+
+  const githubRunId = run.details?.github_run_id;
+  const dispatchedAt = run.details?.dispatched_at;
   if (!githubRunId) {
     await pauseBatch(supabase, batch, "Discovering state with no recorded dispatch -- manual review needed");
     return;
@@ -503,10 +592,19 @@ async function checkDiscoveryProgress(supabase, gh, batch, correlationId, maxRet
     .eq("batch_id", batch.id);
   if (nodesError) throw new Error(`Unable to read batch nodes: ${nodesError.message}`);
 
-  let anyRetried = false;
-
+  // Pass 1: decide, ONCE per node per wave, whether a currently-
+  // "discovering" node actually advanced under the latest dispatch
+  // above. A node already sitting at "pending" is awaiting a retry
+  // dispatch already decided on an earlier tick -- it must never be
+  // re-evaluated or re-incremented here, or a slow-to-land retry would
+  // burn through its retry budget on every tick before its own
+  // dispatch even lands. This is also what keeps retryAttemptKey (used
+  // by the dispatch below) stable across a crash-restart of the same
+  // wave: the set of pending nodes and their retry_count never changes
+  // except by this pass, and this pass only ever touches "discovering"
+  // nodes.
   for (const node of nodes) {
-    if (node.status === "discovered") continue;
+    if (node.status !== "discovering") continue;
 
     const { data: liveNode, error: liveNodeError } = await supabase
       .from("golfnow_discovery_nodes")
@@ -530,7 +628,6 @@ async function checkDiscoveryProgress(supabase, gh, batch, correlationId, maxRet
         .eq("id", node.id);
       if (updateError) throw new Error(`Unable to mark node discovered: ${updateError.message}`);
     } else if (shouldRetryNode(node, maxRetries)) {
-      anyRetried = true;
       const { error: retryError } = await supabase
         .from("golfnow_expansion_batch_nodes")
         .update({
@@ -579,29 +676,45 @@ async function checkDiscoveryProgress(supabase, gh, batch, correlationId, maxRet
     return;
   }
 
-  const stillPending = refreshedNodes.some((n) => n.status === "pending" || n.status === "discovering");
-  if (stillPending) {
-    if (anyRetried) {
-      // Explicit node-ID scoping (same rule as the initial dispatch):
-      // re-run discovery for EXACTLY the nodes being retried, by id --
-      // never a bare count, which would depend on last_run_at ordering
-      // among whatever else happens to be enabled at the time.
-      const pendingNodeIds = refreshedNodes
-        .filter((n) => n.status === "pending")
-        .map((n) => n.discovery_node_id)
-        .filter(Boolean);
-      const retryDispatchedAt = new Date().toISOString();
-      const retryRunId = await gh.dispatchWorkflow(WORKFLOW_DISCOVERY, { node_ids: pendingNodeIds.join(",") });
-      await recordRun(supabase, {
-        batchId: batch.id,
-        correlationId,
-        stage: "discovery",
-        status: "started",
-        details: { github_run_id: retryRunId, dispatched_at: retryDispatchedAt, retry: true, node_count: pendingNodeIds.length },
-      });
+  // Pass 2: dispatch (or resume/reconcile) the retry for every node
+  // currently "pending", via the SAME durable, identity-based mechanism
+  // as the initial dispatch -- scoped by retryAttemptKey, a durable
+  // identity derived from exactly which nodes are retrying at exactly
+  // which retry_count, so a crash-restart of this same wave resumes it
+  // and a genuinely new, later wave never collides with an earlier one.
+  const pendingNodes = refreshedNodes.filter((n) => n.status === "pending");
+  if (pendingNodes.length > 0) {
+    const attemptKey = retryAttemptKey(pendingNodes);
+    const pendingNodeIds = pendingNodes.map((n) => n.discovery_node_id).filter(Boolean);
+
+    const { runId, settling } = await dispatchDurable(supabase, gh, {
+      batchId: batch.id,
+      correlationId,
+      stage: "discovery",
+      attemptKey,
+      workflowFile: WORKFLOW_DISCOVERY,
+      inputs: { node_ids: pendingNodeIds.join(",") },
+    });
+
+    if (settling) return;
+
+    // Identity for this wave's dispatch is now established -- move
+    // these nodes back to "discovering" so the next tick's Pass 1
+    // evaluates them against it exactly once.
+    if (runId) {
+      for (const node of pendingNodes) {
+        const { error: resumeError } = await supabase
+          .from("golfnow_expansion_batch_nodes")
+          .update({ status: "discovering", updated_at: new Date().toISOString() })
+          .eq("id", node.id);
+        if (resumeError) throw new Error(`Unable to resume node ${node.node_name}: ${resumeError.message}`);
+      }
     }
     return;
   }
+
+  const stillDiscovering = refreshedNodes.some((n) => n.status === "discovering");
+  if (stillDiscovering) return; // a node's retry dispatch was just resumed above; let the next tick evaluate it
 
   await recordRun(supabase, { batchId: batch.id, correlationId, stage: "discovery", status: "succeeded" });
   await setBatchStatus(supabase, batch, "validating");
@@ -811,9 +924,15 @@ async function checkForNextImport(supabase, gh, batch, correlationId) {
   }
 
   const runs = await gh.listRecentRuns(WORKFLOW_IMPORT, 10);
-  const completedSince = runs.find((r) => r.status === "completed" && r.created_at >= batch.promoted_at);
+  // Require actual success, not merely "completed" -- a completed run
+  // can still have conclusion 'failure'/'cancelled'/'timed_out', and
+  // pinning one of those would send runVerification to read an
+  // artifact from a run that never produced trustworthy results.
+  const completedSince = runs.find(
+    (r) => r.status === "completed" && r.conclusion === "success" && r.created_at >= batch.promoted_at,
+  );
   if (!completedSince) {
-    console.log("No completed golfnow-import run since promotion yet; waiting for the normal schedule");
+    console.log("No successfully completed golfnow-import run since promotion yet; waiting for the normal schedule");
     return;
   }
 

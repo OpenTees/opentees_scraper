@@ -1,5 +1,13 @@
 name: GolfNow Discovery
 
+# run-name embeds dispatch_token (when the controller supplies one) into
+# this run's own display title, so the controller can reliably find
+# "the run it dispatched" afterwards by identity rather than by guessing
+# from creation time -- which could otherwise match an unrelated
+# scheduled or manually-triggered run. Scheduled/manual runs never set
+# dispatch_token, so they fall back to the default title untouched.
+run-name: ${{ github.event.inputs.dispatch_token && format('GolfNow Discovery [ctrl:{0}]', github.event.inputs.dispatch_token) || github.workflow }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +19,9 @@ on:
         description: "Comma-separated exact discovery node IDs to run (overrides limit_nodes/ordering; leave blank for normal scheduled behaviour)"
         required: false
         default: ""
+      dispatch_token:
+        description: "UK Expansion Controller dispatch identity token (internal use; leave blank for manual/scheduled runs)"
+        required: false
 
   schedule:
     - cron: '0 5 * * *'

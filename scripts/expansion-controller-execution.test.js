@@ -201,7 +201,7 @@ test("startDiscovery: restart safety -- calling it again after nodes already exi
 // row written BEFORE the GitHub call, reconciled (never blindly
 // re-dispatched or blindly assumed) on a restart.
 
-test("startDiscovery: a dispatch_pending intent with a matching later GitHub run is reconciled, never re-dispatched", async () => {
+test("startDiscovery: a dispatch_pending intent with a matching (token-identified) GitHub run is reconciled, never re-dispatched", async () => {
   const intentStartedAt = new Date().toISOString();
   const supabase = makeMockSupabase({
     golfnow_expansion_batch_nodes: [
@@ -209,12 +209,12 @@ test("startDiscovery: a dispatch_pending intent with a matching later GitHub run
     ],
     golfnow_discovery_nodes: [{ id: "node-existing", batch_id: "batch-1" }],
     golfnow_expansion_runs: [
-      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: intentStartedAt, details: {} },
+      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: intentStartedAt, details: { attempt_key: "primary", dispatch_token: "tok-abc" } },
     ],
     golfnow_expansion_batches: [{ id: "batch-1", status: "approved" }],
   });
   const gh = makeMockGithub({
-    listRecentRuns: async () => [{ id: "run-reconciled", created_at: new Date(Date.now() + 1000).toISOString() }],
+    listRecentRuns: async () => [{ id: "run-reconciled", display_title: "GolfNow Discovery [ctrl:tok-abc]" }],
   });
 
   await startDiscovery(supabase, gh, { id: "batch-1" }, "corr-1", 6);
@@ -226,6 +226,36 @@ test("startDiscovery: a dispatch_pending intent with a matching later GitHub run
   assert.equal(supabase._rows("golfnow_expansion_batches")[0].status, "discovering");
 });
 
+test("startDiscovery: defect 3 -- an unrelated run that merely happens to be recent is never adopted; only the exact token-identified run is", async () => {
+  const intentStartedAt = new Date().toISOString();
+  const supabase = makeMockSupabase({
+    golfnow_expansion_batch_nodes: [
+      { id: "bn-1", batch_id: "batch-1", node_name: "Stafford", latitude: 52.8, longitude: -2.1, radius: 35, status: "discovering", retry_count: 0, discovery_node_id: "node-existing" },
+    ],
+    golfnow_discovery_nodes: [{ id: "node-existing", batch_id: "batch-1" }],
+    golfnow_expansion_runs: [
+      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: intentStartedAt, details: { attempt_key: "primary", dispatch_token: "tok-abc" } },
+    ],
+    golfnow_expansion_batches: [{ id: "batch-1", status: "approved" }],
+  });
+  // A scheduled/manually-triggered run exists, created well after the
+  // intent -- but it carries no (or a different) token, so it must
+  // never be mistaken for the controller's own dispatch.
+  const gh = makeMockGithub({
+    listRecentRuns: async () => [
+      { id: "run-unrelated", display_title: "GolfNow Discovery", created_at: new Date(Date.now() + 1000).toISOString() },
+    ],
+  });
+
+  await startDiscovery(supabase, gh, { id: "batch-1" }, "corr-1", 6);
+
+  assert.equal(gh.calls.filter((c) => c[0] === "dispatchWorkflow").length, 0, "settling, not dispatching -- the unrelated run was correctly rejected");
+  const run = supabase._rows("golfnow_expansion_runs").find((r) => r.id === "run-row-1");
+  assert.equal(run.status, "dispatch_pending", "never adopts the unrelated run's id");
+  assert.equal(run.details.github_run_id, undefined);
+  assert.equal(supabase._rows("golfnow_expansion_batches")[0].status, "approved", "batch not advanced on an unverified identity");
+});
+
 test("startDiscovery: a fresh dispatch_pending intent with no matching GitHub run yet waits rather than risking a duplicate dispatch", async () => {
   const intentStartedAt = new Date().toISOString(); // just now -- inside the reconcile window
   const supabase = makeMockSupabase({
@@ -234,7 +264,7 @@ test("startDiscovery: a fresh dispatch_pending intent with no matching GitHub ru
     ],
     golfnow_discovery_nodes: [{ id: "node-existing", batch_id: "batch-1" }],
     golfnow_expansion_runs: [
-      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: intentStartedAt, details: {} },
+      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: intentStartedAt, details: { attempt_key: "primary", dispatch_token: "tok-abc" } },
     ],
     golfnow_expansion_batches: [{ id: "batch-1", status: "approved" }],
   });
@@ -248,7 +278,7 @@ test("startDiscovery: a fresh dispatch_pending intent with no matching GitHub ru
   assert.equal(supabase._rows("golfnow_expansion_batches")[0].status, "approved", "batch not advanced while settling");
 });
 
-test("startDiscovery: a stale dispatch_pending intent (past the reconcile window) with no matching run is safely re-dispatched, reusing the same intent row", async () => {
+test("startDiscovery: a stale dispatch_pending intent (past the reconcile window) with no matching run is safely re-dispatched, reusing the same intent row and its token", async () => {
   const staleStartedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5 minutes ago
   const supabase = makeMockSupabase({
     golfnow_expansion_batch_nodes: [
@@ -256,7 +286,7 @@ test("startDiscovery: a stale dispatch_pending intent (past the reconcile window
     ],
     golfnow_discovery_nodes: [{ id: "node-existing", batch_id: "batch-1" }],
     golfnow_expansion_runs: [
-      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: staleStartedAt, details: {} },
+      { id: "run-row-1", batch_id: "batch-1", stage: "discovery", status: "dispatch_pending", started_at: staleStartedAt, details: { attempt_key: "primary", dispatch_token: "tok-abc" } },
     ],
     golfnow_expansion_batches: [{ id: "batch-1", status: "approved" }],
   });
@@ -265,6 +295,7 @@ test("startDiscovery: a stale dispatch_pending intent (past the reconcile window
   await startDiscovery(supabase, gh, { id: "batch-1" }, "corr-1", 6);
 
   assert.equal(gh.calls.filter((c) => c[0] === "dispatchWorkflow").length, 1);
+  assert.equal(gh.calls.find((c) => c[0] === "dispatchWorkflow")[2].dispatch_token, "tok-abc", "reuses the same durable token, not a fresh one");
   assert.equal(supabase._rows("golfnow_expansion_runs").length, 1, "the stale intent row is reused, not duplicated");
   const run = supabase._rows("golfnow_expansion_runs")[0];
   assert.equal(run.status, "started");
@@ -333,7 +364,11 @@ test("checkDiscoveryProgress: last_run_at did NOT advance and retries remain -> 
   await checkDiscoveryProgress(supabase, gh, { id: "batch-1" }, "corr-1", 2);
 
   const node = supabase._rows("golfnow_expansion_batch_nodes")[0];
-  assert.equal(node.status, "pending");
+  // Once the retry's own dispatch identity is established (the mock
+  // GitHub client confirms synchronously), the node resumes
+  // "discovering" under that new dispatch -- "pending" is only the
+  // transient state while a retry dispatch is in flight/unconfirmed.
+  assert.equal(node.status, "discovering");
   assert.equal(node.retry_count, 1);
   assert.equal(gh.calls.filter((c) => c[0] === "dispatchWorkflow").length, 1);
   // Batch stays in discovering -- not yet moved to validating.
@@ -527,7 +562,7 @@ test("checkPromotionProgress: the promote workflow run itself failed -> paused, 
 
 test("checkForNextImport: no completed import run since promotion yet -> no state change, nothing pinned", async () => {
   const supabase = makeMockSupabase({ golfnow_expansion_batches: [{ id: "batch-1", status: "promoted", promoted_at: "2026-10-12T10:00:00Z" }] });
-  const gh = makeMockGithub({ listRecentRuns: async () => [{ id: 1, status: "completed", created_at: "2026-10-12T09:00:00Z" }] }); // before promotion
+  const gh = makeMockGithub({ listRecentRuns: async () => [{ id: 1, status: "completed", conclusion: "success", created_at: "2026-10-12T09:00:00Z" }] }); // before promotion
   await checkForNextImport(supabase, gh, { id: "batch-1", promoted_at: "2026-10-12T10:00:00Z" }, "corr-1");
   assert.equal(supabase._rows("golfnow_expansion_batches")[0].status, "promoted");
   assert.equal(supabase._rows("golfnow_expansion_runs").length, 0, "nothing pinned when no qualifying run exists yet");
@@ -535,11 +570,34 @@ test("checkForNextImport: no completed import run since promotion yet -> no stat
 
 test("checkForNextImport: a completed import run after promotion -> pins its exact run id and moves to verifying", async () => {
   const supabase = makeMockSupabase({ golfnow_expansion_batches: [{ id: "batch-1", status: "promoted", promoted_at: "2026-10-12T10:00:00Z" }] });
-  const gh = makeMockGithub({ listRecentRuns: async () => [{ id: 777, status: "completed", created_at: "2026-10-12T13:35:00Z" }] });
+  const gh = makeMockGithub({ listRecentRuns: async () => [{ id: 777, status: "completed", conclusion: "success", created_at: "2026-10-12T13:35:00Z" }] });
   await checkForNextImport(supabase, gh, { id: "batch-1", promoted_at: "2026-10-12T10:00:00Z" }, "corr-1");
   assert.equal(supabase._rows("golfnow_expansion_batches")[0].status, "verifying");
   const pinned = supabase._rows("golfnow_expansion_runs").find((r) => r.stage === "import_verification");
   assert.equal(pinned.details.github_run_id, 777);
+});
+
+test("checkForNextImport: a completed-but-failed import run (defect 1) is never pinned, even though it's 'completed' and after promotion", async () => {
+  const supabase = makeMockSupabase({ golfnow_expansion_batches: [{ id: "batch-1", status: "promoted", promoted_at: "2026-10-12T10:00:00Z" }] });
+  const gh = makeMockGithub({
+    listRecentRuns: async () => [{ id: 777, status: "completed", conclusion: "failure", created_at: "2026-10-12T13:35:00Z" }],
+  });
+  await checkForNextImport(supabase, gh, { id: "batch-1", promoted_at: "2026-10-12T10:00:00Z" }, "corr-1");
+  assert.equal(supabase._rows("golfnow_expansion_batches")[0].status, "promoted", "must not advance on a failed run");
+  assert.equal(supabase._rows("golfnow_expansion_runs").length, 0, "nothing pinned -- status=='completed' alone is not enough");
+});
+
+test("checkForNextImport: a completed-and-successful run after promotion is pinned even when an earlier completed-but-failed run also exists", async () => {
+  const supabase = makeMockSupabase({ golfnow_expansion_batches: [{ id: "batch-1", status: "promoted", promoted_at: "2026-10-12T10:00:00Z" }] });
+  const gh = makeMockGithub({
+    listRecentRuns: async () => [
+      { id: 777, status: "completed", conclusion: "failure", created_at: "2026-10-12T13:35:00Z" },
+      { id: 778, status: "completed", conclusion: "success", created_at: "2026-10-12T19:35:00Z" },
+    ],
+  });
+  await checkForNextImport(supabase, gh, { id: "batch-1", promoted_at: "2026-10-12T10:00:00Z" }, "corr-1");
+  const pinned = supabase._rows("golfnow_expansion_runs").find((r) => r.stage === "import_verification");
+  assert.equal(pinned.details.github_run_id, 778, "pins the successful run, skipping the failed one");
 });
 
 test("checkForNextImport: restart safety -- a run already pinned is never re-searched or replaced by a different qualifying run", async () => {
