@@ -3,12 +3,12 @@ name: UK Expansion Controller
 # Permissions and scheduling for the controller's state-machine tick.
 # Safety does NOT depend on this file: expansion_controller_config
 # .automation_enabled defaults to false in production, checked first by
-# the script itself before anything else runs, and runLive()'s actual
-# stage-dispatch wiring is not yet connected (see expansion-controller.js's
-# own header) -- so every run of this workflow is a no-op today
-# regardless of the config flag. This file exists so scheduling,
-# permissions and concurrency protection are already correct and tested
-# for when that wiring is completed and reviewed.
+# the script itself (decideTick) before anything else runs -- every run
+# of this workflow is a no-op while that flag is false, regardless of
+# whatever else exists in the queue. runLive()'s stage-dispatch wiring
+# IS fully connected (real discovery/validation/promotion/import-
+# verification execution paths, with crash-safe durable dispatch) --
+# the single safety gate is the config flag, not an unfinished code path.
 
 on:
   workflow_dispatch:
