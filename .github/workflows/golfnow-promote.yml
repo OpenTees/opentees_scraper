@@ -1,5 +1,13 @@
 name: GolfNow Promote
 
+# run-name embeds dispatch_token (when the controller supplies one) into
+# this run's own display title, so the controller can reliably find
+# "the run it dispatched" afterwards by identity rather than by guessing
+# from creation time -- which could otherwise match an unrelated
+# scheduled or manually-triggered run. Scheduled/manual runs never set
+# dispatch_token, so they fall back to the default title untouched.
+run-name: ${{ github.event.inputs.dispatch_token && format('GolfNow Promote [ctrl:{0}]', github.event.inputs.dispatch_token) || github.workflow }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +15,12 @@ on:
         description: "Minimum tee times needed to promote a course"
         required: false
         default: "50"
+      batch_id:
+        description: "UK Expansion Controller batch id to scope this promotion to (leave blank for the normal, unscoped promotion -- every existing use of this workflow)"
+        required: false
+      dispatch_token:
+        description: "UK Expansion Controller dispatch identity token (internal use; leave blank for manual/scheduled runs)"
+        required: false
 
   schedule:
     - cron: '20 5 * * *'
@@ -19,6 +33,10 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       MIN_TEE_TIMES: ${{ github.event.inputs.min_tee_times || '50' }}
+      # Blank on every scheduled run and every pre-existing manual run --
+      # BATCH_ID only has a value when the UK Expansion Controller itself
+      # dispatches this workflow for one specific approved batch.
+      BATCH_ID: ${{ github.event.inputs.batch_id }}
 
     steps:
       - name: Checkout

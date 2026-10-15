@@ -9,15 +9,37 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     enabled: false,
   },
 });
+// Optional: the UK Expansion Controller sets this to a comma-separated
+// list of exact golfnow_discovery_nodes.id values to scope a run to --
+// e.g. one approved batch's nodes, or a specific node being retried.
+// When set, this is the ONLY thing that determines which nodes run:
+// no last_run_at ordering, no LIMIT_NODES, so a concurrent legacy node
+// whose last_run_at happens to be older can never be picked up by
+// mistake and a requested node is never silently dropped because
+// something else sorted ahead of it. When unset (every existing
+// scheduled/manual invocation, forever), behaviour is unchanged: the
+// oldest-run-first N enabled nodes, as before this feature existed.
+const NODE_IDS = (process.env.NODE_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+
 async function main() {
-  const { data: nodes, error } = await supabase
-    .from("golfnow_discovery_nodes")
-    .select("*")
-    .eq("enabled", true)
-    .order("last_run_at", { ascending: true, nullsFirst: true })
-    .limit(Number(process.env.LIMIT_NODES || 3));
+  let query = supabase.from("golfnow_discovery_nodes").select("*").eq("enabled", true);
+
+  query = NODE_IDS.length
+    ? query.in("id", NODE_IDS)
+    : query.order("last_run_at", { ascending: true, nullsFirst: true }).limit(Number(process.env.LIMIT_NODES || 3));
+
+  const { data: nodes, error } = await query;
 
   if (error) throw error;
+
+  if (NODE_IDS.length && (nodes || []).length !== NODE_IDS.length) {
+    const found = new Set((nodes || []).map((n) => n.id));
+    const missing = NODE_IDS.filter((id) => !found.has(id));
+    console.warn(`Requested node id(s) not found or not enabled: ${missing.join(", ")}`);
+  }
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -108,6 +130,12 @@ if (
         discovery_latitude: Number(node.latitude),
         discovery_longitude: Number(node.longitude),
         discovery_radius: Number(node.radius || 35),
+        // Reliable batch/node ownership (see migration
+        // golfnow_discovered_facilities_node_ownership) -- never rely on
+        // discovery_latitude/discovery_longitude for this: they only
+        // reflect whichever node most recently upserted the row, and
+        // two different nodes could coincide on the same coordinates.
+        discovery_node_id: node.id,
         last_seen_at: new Date().toISOString(),
       });
     }
@@ -136,7 +164,35 @@ if (dedupedRows.length) {
   if (upsertError) throw upsertError;
 }
 
- console.log(`Saved ${dedupedRows.length} discovered facilities`);
+// Durable ownership (see golfnow_facility_discovery_events migration):
+// one event per (facility, node) pairing actually seen THIS run, from
+// filteredRows -- not dedupedRows, which collapses to one row per
+// facility per run and would silently drop a second node's own claim if
+// two nodes in this same run both found the same facility. Idempotent:
+// re-discovery by a node that already has a row for this facility is a
+// harmless no-op (unique constraint + ignoreDuplicates), never an error
+// and never a second, conflicting row.
+const discoveryEvents = Array.from(
+  new Map(
+    filteredRows.map((row) => [
+      `${row.provider_course_id}:${row.discovery_node_id}`,
+      { provider_course_id: row.provider_course_id, discovery_node_id: row.discovery_node_id },
+    ])
+  ).values()
+);
+
+if (discoveryEvents.length) {
+  const { error: eventsError } = await supabase
+    .from("golfnow_facility_discovery_events")
+    .upsert(discoveryEvents, {
+      onConflict: "provider_course_id,discovery_node_id",
+      ignoreDuplicates: true,
+    });
+
+  if (eventsError) throw eventsError;
+}
+
+ console.log(`Saved ${dedupedRows.length} discovered facilities (${discoveryEvents.length} discovery event(s))`);
 
 console.table(
   dedupedRows
