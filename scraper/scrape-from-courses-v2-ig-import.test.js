@@ -10,6 +10,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  londonTodayIsoDate,
   tomorrowIsoDate,
   extractSlotDateFromBody,
   extractDateFromUrl,
@@ -23,6 +24,38 @@ test("tomorrowIsoDate is genuinely one calendar day after today", () => {
   assert.notEqual(tomorrow, today);
   const diffDays = (new Date(`${tomorrow}T00:00:00Z`) - new Date(`${today}T00:00:00Z`)) / 86400000;
   assert.equal(diffDays, 1);
+});
+
+// --- Deterministic Europe/London boundary tests -------------------------
+// Same bug class as the BRS script's: a naive UTC `tomorrowIsoDate`
+// would be wrong for roughly 23:00-23:59 UTC on every British Summer
+// Time day, since London local time (UTC+1) has already crossed into
+// the next calendar day by then.
+
+test("londonTodayIsoDate: during BST, after London local midnight but before UTC midnight, resolves to the NEW London day", () => {
+  const now = new Date("2026-07-14T23:30:00Z"); // = 2026-07-15 00:30 BST
+  assert.equal(londonTodayIsoDate(now), "2026-07-15");
+});
+
+test("londonTodayIsoDate: during BST, shortly before London local midnight, still resolves to the OLD day", () => {
+  const now = new Date("2026-07-14T22:30:00Z"); // = 2026-07-14 23:30 BST
+  assert.equal(londonTodayIsoDate(now), "2026-07-14");
+});
+
+test("tomorrowIsoDate: BST boundary -- the exact window where a naive UTC calculation would be wrong by a day", () => {
+  const now = new Date("2026-07-14T23:30:00Z");
+  assert.equal(tomorrowIsoDate(now), "2026-07-16");
+});
+
+test("tomorrowIsoDate: GMT (winter), no UTC/London offset -- correct either way", () => {
+  const now = new Date("2026-01-14T23:30:00Z");
+  assert.equal(tomorrowIsoDate(now), "2026-01-15");
+});
+
+test("tomorrowIsoDate: the DST spring-forward night itself still resolves to a clean calendar day", () => {
+  const now = new Date("2026-03-29T01:30:00Z"); // already 02:30 BST
+  assert.equal(londonTodayIsoDate(now), "2026-03-29");
+  assert.equal(tomorrowIsoDate(now), "2026-03-30");
 });
 
 test("resolveIgSlotDate: legacy/shadow course accepts the observed date only when the click happened AND it matches the expected future date", () => {

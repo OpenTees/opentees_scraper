@@ -22,10 +22,44 @@ function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function tomorrowIsoDate() {
-  const d = new Date();
+// UTC-naive "tomorrow" is wrong for part of every BST day: during
+// roughly 23:00-23:59 UTC in British Summer Time, London local time has
+// already crossed into the next calendar day (BST is UTC+1), so a plain
+// `new Date(); setUTCDate(+1)` would compute what is genuinely TODAY in
+// London -- not tomorrow -- reintroducing exactly the same-day rejection
+// this fix exists to prevent. The course sites and production's own
+// MIN_NOTICE_HOURS cutoff (ingest-tee-times/index.ts's
+// getLondonNowParts()) both operate in Europe/London local time, so
+// "tomorrow" is derived from London's calendar date, not UTC's --
+// mirroring that same function's technique. `now` is injectable for
+// deterministic boundary testing; production always uses the default.
+function londonTodayIsoDate(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function tomorrowIsoDate(now = new Date()) {
+  // londonTodayIsoDate already resolved the DST-sensitive part (which
+  // calendar day London is actually on). Adding one day to that
+  // date-only string via UTC arithmetic is safe and unambiguous -- pure
+  // calendar-day math has no DST transition to cross.
+  const d = new Date(`${londonTodayIsoDate(now)}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
+}
+
+// Pure: stable_active/stable_reconciling never requests a date here at
+// all -- that course's real ingestion is a separate, self-contained
+// call (runBrsSnapshotIngestion, today) and this fetch would be wasted
+// and misleading. Only legacy/shadow courses get tomorrow.
+function resolveBrsSlotDate(isStableState, now = new Date()) {
+  return isStableState ? null : tomorrowIsoDate(now);
 }
 
 function normalisePrice(priceText) {
@@ -195,11 +229,24 @@ async function scrapeCourseInner(browser, courseConfig) {
     // course the same way it always has); the actual rows come from
     // the teesheet API fetch below, for tomorrow -- never today, which
     // production's 2-hour minimum-notice ingestion rule rejects wholesale.
-    const slotDate = tomorrowIsoDate();
-    const { extractedRows, snapshotComplete } = await extractRowsFromBrsTeesheet(
-      courseConfig,
-      slotDate
-    );
+    //
+    // Skipped entirely for stable_active/stable_reconciling: that course
+    // is excluded from allRows below regardless (see run()), and its
+    // real ingestion happens separately via
+    // lifecycleShadow.runBrsSnapshotIngestion for TODAY, with its own
+    // self-contained begin-token -> fetch -> apply call all agreeing on
+    // the same date. Fetching tomorrow here too would be a wasted extra
+    // request against the club's site and would show a misleading
+    // "tomorrow" in this course's diagnostics for data that was never
+    // actually used.
+    const isStableState =
+      courseConfig.lifecyclePilotState === "stable_active" ||
+      courseConfig.lifecyclePilotState === "stable_reconciling";
+
+    const slotDate = resolveBrsSlotDate(isStableState);
+    const { extractedRows, snapshotComplete } = isStableState
+      ? { extractedRows: [], snapshotComplete: null }
+      : await extractRowsFromBrsTeesheet(courseConfig, slotDate);
 
     const safeSlug =
       courseConfig.courseSlug ||
@@ -211,11 +258,15 @@ async function scrapeCourseInner(browser, courseConfig) {
       targetUrl: courseConfig.targetUrl,
       finalUrl,
       title,
+      isStableState,
       slotDate,
       snapshotComplete,
       extractedCount: extractedRows.length,
       extractedPreview: extractedRows.slice(0, 10),
       bodyPreview,
+      note: isStableState
+        ? "Stable-state course -- inventory ingested separately via runBrsSnapshotIngestion (today), not via this fetch"
+        : null,
     };
 
     fs.writeFileSync(
@@ -350,15 +401,15 @@ async function run() {
 
       if (state === "stable_active" || state === "stable_reconciling") {
         // Stable states: legacy identity is never built or sent for this
-        // course — it is deliberately excluded from allRows/uniqueRows,
-        // so the unfenced legacy ingestion call below cannot touch it.
-        // Stable rows go through the snapshot-token path instead (begin
-        // -> fresh BRS teesheet fetch -> apply), using a fresh BRS
-        // teesheet fetch (the HTML-scrape extraction above doesn't carry
-        // BRS's provider slot id, which the stable identity needs). The
-        // token is obtained before this fetch, not after, so an older
-        // in-flight scrape can never silently overwrite a newer one once
-        // both reach the database.
+        // course — scrapeCourseInner already skipped its own teesheet
+        // fetch for it (isStableState), so result.extractedRows is
+        // always empty here and allRows is untouched. Stable rows go
+        // through the snapshot-token path instead (begin -> its own
+        // fresh BRS teesheet fetch, for the same date, inside
+        // runBrsSnapshotIngestion -> apply). The token is obtained
+        // before that fetch, not after, so an older in-flight scrape
+        // can never silently overwrite a newer one once both reach the
+        // database.
         try {
           const activeResult = await lifecycleShadow.runBrsSnapshotIngestion(
             shadowConfig,
@@ -457,7 +508,9 @@ if (require.main === module) {
 
 module.exports = {
   runShadowProposalForCourse,
+  londonTodayIsoDate,
   tomorrowIsoDate,
+  resolveBrsSlotDate,
   buildExternalId,
   extractRowsFromBrsTeesheet,
 };

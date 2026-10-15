@@ -8,7 +8,13 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { tomorrowIsoDate, extractRowsFromBrsTeesheet, buildExternalId } = require("./scrape-from-courses-v2-import");
+const {
+  londonTodayIsoDate,
+  tomorrowIsoDate,
+  resolveBrsSlotDate,
+  extractRowsFromBrsTeesheet,
+  buildExternalId,
+} = require("./scrape-from-courses-v2-import");
 
 function withMockedFetch(responses, fn) {
   const originalFetch = global.fetch;
@@ -48,6 +54,61 @@ test("tomorrowIsoDate is genuinely one calendar day after today, never the same 
   assert.notEqual(tomorrow, today);
   const diffDays = (new Date(`${tomorrow}T00:00:00Z`) - new Date(`${today}T00:00:00Z`)) / 86400000;
   assert.equal(diffDays, 1);
+});
+
+// --- Deterministic Europe/London boundary tests -------------------------
+// The bug a naive UTC `tomorrowIsoDate` has: during roughly 23:00-23:59
+// UTC on a British Summer Time day, London local time (UTC+1) has
+// already crossed into the next calendar day. UTC-only arithmetic would
+// then compute what is genuinely TODAY in London as "tomorrow" --
+// reintroducing the exact same-day rejection this whole fix exists to
+// prevent, for about one hour of every BST day.
+
+test("londonTodayIsoDate: during BST, after London local midnight but before UTC midnight, resolves to the NEW London day (not UTC's old one)", () => {
+  // 2026-07-14 23:30 UTC = 2026-07-15 00:30 BST (BST = UTC+1, and 14
+  // July is within British Summer Time).
+  const now = new Date("2026-07-14T23:30:00Z");
+  assert.equal(londonTodayIsoDate(now), "2026-07-15");
+});
+
+test("londonTodayIsoDate: during BST, shortly before London local midnight, still resolves to the OLD day", () => {
+  // 2026-07-14 22:30 UTC = 2026-07-14 23:30 BST -- still 14 July locally.
+  const now = new Date("2026-07-14T22:30:00Z");
+  assert.equal(londonTodayIsoDate(now), "2026-07-14");
+});
+
+test("tomorrowIsoDate: BST boundary -- the exact window where a naive UTC calculation would be wrong by a day", () => {
+  // At 23:30 UTC on 14 July (BST), London is already into 15 July.
+  // Genuine tomorrow is 16 July. A UTC-naive `new Date(); +1 day` would
+  // instead compute 15 July -- which is actually TODAY in London, not
+  // tomorrow, and would fail the 2-hour minimum-notice rule exactly
+  // like the original same-day bug.
+  const now = new Date("2026-07-14T23:30:00Z");
+  assert.equal(tomorrowIsoDate(now), "2026-07-16");
+});
+
+test("tomorrowIsoDate: GMT (winter), no UTC/London offset -- a plain UTC day boundary is correct either way", () => {
+  // 2026-01-14 23:30 UTC = 2026-01-14 23:30 GMT (no DST offset in January).
+  const now = new Date("2026-01-14T23:30:00Z");
+  assert.equal(tomorrowIsoDate(now), "2026-01-15");
+});
+
+test("tomorrowIsoDate: the DST spring-forward night itself (clocks jump 01:00->02:00 BST) still resolves to a clean calendar day", () => {
+  // 2026-03-29 is the UK's spring-forward date. 01:30 UTC that day is
+  // still GMT (the jump to BST happens at 01:00 UTC on the 29th, i.e.
+  // clocks go from 01:00 GMT straight to 02:00 BST) -- London local
+  // time at 01:30 UTC is already 02:30 BST.
+  const now = new Date("2026-03-29T01:30:00Z");
+  assert.equal(londonTodayIsoDate(now), "2026-03-29");
+  assert.equal(tomorrowIsoDate(now), "2026-03-30");
+});
+
+test("resolveBrsSlotDate: a stable-state course never requests a date here at all -- that fetch would be wasted and is handled separately", () => {
+  assert.equal(resolveBrsSlotDate(true, new Date("2026-07-14T23:30:00Z")), null);
+});
+
+test("resolveBrsSlotDate: a legacy/shadow course gets the genuine London-correct tomorrow, even across the BST boundary", () => {
+  assert.equal(resolveBrsSlotDate(false, new Date("2026-07-14T23:30:00Z")), "2026-07-16");
 });
 
 test("extractRowsFromBrsTeesheet builds genuine future-dated rows from a complete snapshot for the requested date, never today's", async () => {

@@ -69,8 +69,34 @@ function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function tomorrowIsoDate() {
-  const d = new Date();
+// UTC-naive "tomorrow" is wrong for part of every BST day: during
+// roughly 23:00-23:59 UTC in British Summer Time, London local time has
+// already crossed into the next calendar day (BST is UTC+1), so a plain
+// `new Date(); setUTCDate(+1)` would compute what is genuinely TODAY in
+// London -- not tomorrow -- reintroducing exactly the same-day rejection
+// this fix exists to prevent. The club sites and production's own
+// MIN_NOTICE_HOURS cutoff (ingest-tee-times/index.ts's
+// getLondonNowParts()) both operate in Europe/London local time, so
+// "tomorrow" is derived from London's calendar date, not UTC's --
+// mirroring that same function's technique. `now` is injectable for
+// deterministic boundary testing; production always uses the default.
+function londonTodayIsoDate(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function tomorrowIsoDate(now = new Date()) {
+  // londonTodayIsoDate already resolved the DST-sensitive part (which
+  // calendar day London is actually on). Adding one day to that
+  // date-only string via UTC arithmetic is safe and unambiguous -- pure
+  // calendar-day math has no DST transition to cross.
+  const d = new Date(`${londonTodayIsoDate(now)}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
 }
@@ -583,6 +609,7 @@ if (require.main === module) {
 module.exports = {
   runShadowProposalForCourse,
   isIgSnapshotComplete,
+  londonTodayIsoDate,
   tomorrowIsoDate,
   extractSlotDateFromBody,
   extractDateFromUrl,
