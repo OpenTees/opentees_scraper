@@ -58,13 +58,21 @@ function extractDateFromUrl(targetUrl) {
   return match ? match[1] : null;
 }
 
-// Same-day-only scraping (unchanged elsewhere in this scraper): the
+// Used only by the stable-identity snapshot-token path below (out of
+// scope for the future-date fix: that path is a separate, already-
+// fenced lifecycle mechanism, deliberately untouched here). The
 // expected slot date for a snapshot-token begin call is always today,
 // determined before the Playwright fetch runs. The date later extracted
 // from the actual page (result.slotDate) confirms what was really
 // returned and is what gets sent to apply_lifecycle_snapshot itself.
 function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function tomorrowIsoDate() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
 }
 
 function normalisePrice(priceText) {
@@ -83,6 +91,18 @@ function normalisePrice(priceText) {
 
 function buildExternalId(providerCourseId, slotDate, slotTime, price) {
   return `${providerCourseId}-${slotDate}-${slotTime}-${price ?? "na"}`;
+}
+
+// Pure: the fail-closed decision for whether this run's extraction is
+// trustworthy. Stable-state courses are untouched by the next-day click
+// (that fenced path expects today, unchanged from before this fix).
+// Legacy/shadow courses only accept rows when the click actually
+// happened AND the page now genuinely displays the expected future
+// date -- never "whatever the page shows" relabelled as tomorrow, which
+// is exactly how the same-day-only problem could silently return.
+function resolveIgSlotDate({ isStableState, nextDayClicked, observedSlotDate, expectedSlotDate }) {
+  if (isStableState) return observedSlotDate || null;
+  return nextDayClicked && observedSlotDate === expectedSlotDate ? observedSlotDate : null;
 }
 
 async function tryAcceptCookies(page) {
@@ -210,6 +230,37 @@ async function scrapeCourseInner(browser, courseConfig) {
     await tryAcceptCookies(page);
     await page.waitForTimeout(2500);
 
+    // Advance the shared IntelligentGolf teesheet widget to tomorrow
+    // BEFORE extracting anything -- confirmed live against production
+    // club pages (a distinct domain per club, but the same widget:
+    // `a.date-nav-btn[data-direction="next"]`) that this genuinely
+    // re-renders the page with the next day's own real availability and
+    // prices, not a relabelled copy of today's. If the click fails (the
+    // widget isn't present, e.g. a site redesign), nextDayClicked stays
+    // false and extraction below is skipped entirely -- this never
+    // falls back to silently extracting today's page under tomorrow's
+    // label.
+    //
+    // Skipped entirely for stable_active/stable_reconciling: that path
+    // (below, via lifecycleShadow.applyIgSnapshotIngestion) begins its
+    // snapshot token for TODAY before this function is even called, so
+    // the page it fetches must stay on today too -- out of scope for
+    // this fix, and left exactly as it already worked.
+    const isStableState =
+      courseConfig.lifecyclePilotState === "stable_active" ||
+      courseConfig.lifecyclePilotState === "stable_reconciling";
+
+    const nextDayClicked = isStableState
+      ? false
+      : await page
+          .click('a.date-nav-btn[data-direction="next"]', { timeout: 5000 })
+          .then(() => true)
+          .catch(() => false);
+
+    if (nextDayClicked) {
+      await page.waitForTimeout(2500);
+    }
+
     const title = await page.title();
     const finalUrl = page.url();
 
@@ -220,17 +271,27 @@ async function scrapeCourseInner(browser, courseConfig) {
 
     const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 2000);
 
-    const slotDate =
+    const observedSlotDate =
       extractSlotDateFromBody(bodyText) ||
       extractDateFromUrl(finalUrl) ||
       extractDateFromUrl(courseConfig.targetUrl);
 
-    const anchorRows = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("a")).map((a) => ({
-        text: (a.innerText || "").replace(/\s+/g, " ").trim(),
-        href: a.getAttribute("href"),
-      }));
-    }).catch(() => []);
+    const expectedSlotDate = tomorrowIsoDate();
+    const slotDate = resolveIgSlotDate({
+      isStableState,
+      nextDayClicked,
+      observedSlotDate,
+      expectedSlotDate,
+    });
+
+    const anchorRows = slotDate
+      ? await page.evaluate(() => {
+          return Array.from(document.querySelectorAll("a")).map((a) => ({
+            text: (a.innerText || "").replace(/\s+/g, " ").trim(),
+            href: a.getAttribute("href"),
+          }));
+        }).catch(() => [])
+      : [];
 
     const extractedRows = slotDate
       ? extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate)
@@ -246,11 +307,23 @@ async function scrapeCourseInner(browser, courseConfig) {
       targetUrl: courseConfig.targetUrl,
       finalUrl,
       title,
+      isStableState,
+      nextDayClicked,
+      expectedSlotDate: isStableState ? null : expectedSlotDate,
+      observedSlotDate: observedSlotDate || null,
       slotDate: slotDate || null,
       extractedCount: extractedRows.length,
       extractedPreview: extractedRows.slice(0, 10),
       bodyPreview,
-      note: !slotDate ? "Could not detect slot date from page body or URL" : null,
+      note: isStableState
+        ? !observedSlotDate
+          ? "Could not detect slot date from page body or URL"
+          : null
+        : !nextDayClicked
+          ? "Could not click the next-day control -- no rows extracted"
+          : observedSlotDate !== expectedSlotDate
+            ? `Page date after click (${observedSlotDate || "none detected"}) did not match expected tomorrow (${expectedSlotDate}) -- no rows extracted`
+            : null,
     };
 
     fs.writeFileSync(
@@ -510,4 +583,10 @@ if (require.main === module) {
 module.exports = {
   runShadowProposalForCourse,
   isIgSnapshotComplete,
+  tomorrowIsoDate,
+  extractSlotDateFromBody,
+  extractDateFromUrl,
+  extractRowsFromAnchors,
+  buildExternalId,
+  resolveIgSlotDate,
 };

@@ -22,6 +22,12 @@ function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function tomorrowIsoDate() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 function normalisePrice(priceText) {
   if (!priceText) return null;
 
@@ -97,56 +103,61 @@ async function fetchCoursesFromSupabase() {
   }));
 }
 
-function extractRowsFromBrsBody(bodyText, courseConfig, finalUrl, title) {
-  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+// Replaces the old same-day HTML-body regex scrape. BRS's visitor-
+// booking SPA calls its own JSON API under the hood
+// (`/api/casualBooking/teesheet?date=...&course_id=...`) -- confirmed
+// live against production club pages, including that passing a
+// different `date` genuinely returns that day's own distinct teesheet,
+// not a relabelled copy of today's. Reuses the SAME fetch and
+// completeness gate already proven in production for stable-identity
+// ingestion (lifecycleShadow.fetchBrsTeesheetJson /
+// isBrsSnapshotComplete) rather than a second implementation. Fails
+// closed (empty rows, snapshotComplete: false) on any incomplete,
+// errored or unparseable response -- this never falls back to
+// extracting today's page and relabelling it as the requested date.
+async function extractRowsFromBrsTeesheet(courseConfig, slotDate) {
+  const teesheetJson = await lifecycleShadow.fetchBrsTeesheetJson(courseConfig, slotDate);
 
-  const priceMatch = text.match(/TEE TIMES FROM\s*£\s*([0-9]+(?:\.[0-9]{2})?)/i);
-  const price = priceMatch ? normalisePrice(priceMatch[1]) : null;
+  if (!lifecycleShadow.isBrsSnapshotComplete(teesheetJson, slotDate)) {
+    return { extractedRows: [], snapshotComplete: false };
+  }
 
-  if (!price) return [];
+  const rows = teesheetJson.data.tee_times
+    .map((slot) => {
+      const priceText = slot.green_fees?.[0]?.green_fee1_ball;
+      const price = priceText ? normalisePrice(priceText) : null;
 
-  const afterPrice = text.split(priceMatch[0])[1] || "";
+      return {
+        external_id: buildExternalId(
+          courseConfig.providerCourseId,
+          slotDate,
+          slot.time,
+          price
+        ),
+        provider_course_id: courseConfig.providerCourseId,
+        course_name: courseConfig.courseName,
+        slot_date: slotDate,
+        slot_time: slot.time,
+        price,
+        players: 4,
+        booking_url: courseConfig.targetUrl,
+        google_rating: courseConfig.googleRating,
+        google_reviews: courseConfig.googleReviews,
+        raw_payload: {
+          source: "courses_v2_import_brs_teesheet_api",
+          provider: courseConfig.provider,
+          club: courseConfig.courseName,
+          target_url: courseConfig.targetUrl,
+          provider_slot_id: slot.id,
+        },
+      };
+    })
+    .filter((row) => row.price !== null);
 
-  const timeMatches = Array.from(
-    afterPrice.matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b/g)
-  );
-
-  const slotDate = todayIsoDate();
-
-  const rows = timeMatches.map((match) => {
-    const slotTime = `${match[1].padStart(2, "0")}:${match[2]}`;
-
-    return {
-      external_id: buildExternalId(
-        courseConfig.providerCourseId,
-        slotDate,
-        slotTime,
-        price
-      ),
-      provider_course_id: courseConfig.providerCourseId,
-      course_name: courseConfig.courseName,
-      slot_date: slotDate,
-      slot_time: slotTime,
-      price,
-      players: 4,
-      booking_url: finalUrl,
-      google_rating: courseConfig.googleRating,
-      google_reviews: courseConfig.googleReviews,
-      raw_payload: {
-        source: "courses_v2_import_brs",
-        provider: courseConfig.provider,
-        club: courseConfig.courseName,
-        target_url: courseConfig.targetUrl,
-        final_url: finalUrl,
-        title,
-        price_text: priceMatch[0],
-      },
-    };
-  });
-
-  return Array.from(
-    new Map(rows.map((row) => [row.external_id, row])).values()
-  );
+  return {
+    extractedRows: Array.from(new Map(rows.map((row) => [row.external_id, row])).values()),
+    snapshotComplete: true,
+  };
 }
 
 async function scrapeCourseInner(browser, courseConfig) {
@@ -179,11 +190,15 @@ async function scrapeCourseInner(browser, courseConfig) {
 
     const bodyPreview = bodyText.replace(/\s+/g, " ").trim().slice(0, 2000);
 
-    const extractedRows = extractRowsFromBrsBody(
-      bodyText,
+    // The page load above is a liveness/reachability check on the
+    // club's own booking site (a dead/erroring page still fails this
+    // course the same way it always has); the actual rows come from
+    // the teesheet API fetch below, for tomorrow -- never today, which
+    // production's 2-hour minimum-notice ingestion rule rejects wholesale.
+    const slotDate = tomorrowIsoDate();
+    const { extractedRows, snapshotComplete } = await extractRowsFromBrsTeesheet(
       courseConfig,
-      finalUrl,
-      title
+      slotDate
     );
 
     const safeSlug =
@@ -196,7 +211,8 @@ async function scrapeCourseInner(browser, courseConfig) {
       targetUrl: courseConfig.targetUrl,
       finalUrl,
       title,
-      slotDate: todayIsoDate(),
+      slotDate,
+      snapshotComplete,
       extractedCount: extractedRows.length,
       extractedPreview: extractedRows.slice(0, 10),
       bodyPreview,
@@ -215,6 +231,7 @@ async function scrapeCourseInner(browser, courseConfig) {
       course: courseConfig.courseName,
       provider: courseConfig.provider,
       extractedRows,
+      slotDate,
       info,
     };
   } finally {
@@ -353,18 +370,21 @@ async function run() {
           console.error(`[${courseConfig.courseName}] STABLE INGESTION ERROR:`, activeError);
         }
       } else {
-        // legacy or shadow: today's unchanged legacy identity/ingestion.
+        // legacy or shadow: unfenced legacy identity/ingestion, now for
+        // tomorrow's genuine teesheet (see extractRowsFromBrsTeesheet).
         allRows.push(...result.extractedRows);
       }
 
       // Shadow mode: computes and logs a proposal only, via a completely
       // separate call — never alters `allRows`/`uniqueRows`, so the
       // legacy ingestion path below is byte-for-byte unaffected by this.
+      // Uses the same date the legacy path actually ingested, so the
+      // logged comparison stays meaningful.
       if (state === "shadow") {
         try {
           await runShadowProposalForCourse(
             courseConfig,
-            todayIsoDate(),
+            result.slotDate,
             null,
           );
         } catch (shadowError) {
@@ -437,4 +457,7 @@ if (require.main === module) {
 
 module.exports = {
   runShadowProposalForCourse,
+  tomorrowIsoDate,
+  buildExternalId,
+  extractRowsFromBrsTeesheet,
 };
