@@ -115,8 +115,17 @@ function normalisePrice(priceText) {
   return Math.round(value);
 }
 
-function buildExternalId(providerCourseId, slotDate, slotTime, price) {
-  return `${providerCourseId}-${slotDate}-${slotTime}-${price ?? "na"}`;
+// Holes is part of the identity, not just the price: the shared
+// IntelligentGolf teesheet widget's own "9 HOLES / 18 HOLES" radio
+// (form field `maxholes`) genuinely changes which bookable products a
+// course offers -- confirmed live (Addington Court: submitting the
+// teesheet form with maxholes=18 vs maxholes=9 returns different,
+// independently-priced content, not a client-side filter of the same
+// data). Price alone would usually differ too, but holes is included
+// explicitly so two offers can never collide even if their prices
+// happen to match.
+function buildExternalId(providerCourseId, slotDate, slotTime, price, holes) {
+  return `${providerCourseId}-${slotDate}-${slotTime}-${price ?? "na"}-${holes ?? "na"}h`;
 }
 
 // Pure: the fail-closed decision for whether this run's extraction is
@@ -186,7 +195,7 @@ async function fetchCoursesFromSupabase() {
 
 const { isIgSnapshotComplete } = lifecycleShadow;
 
-function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate) {
+function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate, holes = null) {
   const extractedRows = [];
 
   for (const row of anchorRows) {
@@ -208,7 +217,8 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
         courseConfig.providerCourseId,
         slotDate,
         slotTime,
-        price
+        price,
+        holes
       ),
       provider_course_id: courseConfig.providerCourseId,
       course_name: courseConfig.courseName,
@@ -216,6 +226,7 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
       slot_time: slotTime,
       price,
       players: 4,
+      holes,
       booking_url: bookingUrl,
       google_rating: courseConfig.googleRating,
       google_reviews: courseConfig.googleReviews,
@@ -234,6 +245,48 @@ function extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotD
   return Array.from(
     new Map(extractedRows.map((row) => [row.external_id, row])).values()
   );
+}
+
+// Fetches one hole-count variant of the teesheet via the SAME form the
+// page's own "9 HOLES / 18 HOLES" control submits (form field
+// `maxholes`), reusing the already-established page session/cookies
+// via an in-page fetch -- never a second Playwright navigation, and
+// never a guessed/hardcoded `course`/`group` selector: every other
+// field is taken verbatim from the page's own current form state, only
+// `maxholes` is overridden. Returns null if the page has no
+// `teetimes_nav_form` at all; returns { unsupported: true } if that
+// form has no `maxholes` field -- i.e. this course's booking widget
+// doesn't expose a 9/18 split at all, which is a real, honest signal,
+// not a failure. Uses textContent rather than innerText because the
+// parsed response document is never attached to the live DOM, where
+// innerText (which depends on computed layout) is unreliable.
+async function fetchHolesVariant(page, maxholes) {
+  return page.evaluate(async (maxholes) => {
+    const form = document.getElementById("teetimes_nav_form");
+    if (!form) return null;
+
+    const formData = new FormData(form);
+    if (!formData.has("maxholes")) return { unsupported: true };
+
+    const params = new URLSearchParams();
+    for (const [key, value] of formData.entries()) {
+      params.set(key, key === "maxholes" ? String(maxholes) : value);
+    }
+
+    const res = await fetch(window.location.href, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    const text = await res.text();
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    const bodyText = doc.body ? doc.body.textContent : "";
+    const anchorRows = Array.from(doc.querySelectorAll("a")).map((a) => ({
+      text: (a.textContent || "").replace(/\s+/g, " ").trim(),
+      href: a.getAttribute("href"),
+    }));
+    return { bodyText, anchorRows };
+  }, maxholes);
 }
 
 async function scrapeCourseInner(browser, courseConfig) {
@@ -319,9 +372,48 @@ async function scrapeCourseInner(browser, courseConfig) {
         }).catch(() => [])
       : [];
 
-    const extractedRows = slotDate
-      ? extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate)
-      : [];
+    // Stable-state courses: untouched, exactly as before -- single pass,
+    // no holes tagging, out of scope for this fix (see isStableState
+    // above). Legacy/shadow courses: try both hole-count variants via
+    // the page's own `maxholes` form field; fall back to the single
+    // current-page-state pass (holes left null, exactly the prior
+    // behaviour) only when the course's widget has no maxholes field at
+    // all -- never guessed, never defaulted to 18.
+    let extractedRows = [];
+    let holesSupport = null;
+
+    if (slotDate && !isStableState) {
+      const [variant9, variant18] = await Promise.all([
+        fetchHolesVariant(page, 9).catch(() => null),
+        fetchHolesVariant(page, 18).catch(() => null),
+      ]);
+
+      const supportsHoles = [variant9, variant18].some((v) => v && !v.unsupported);
+      holesSupport = supportsHoles;
+
+      if (supportsHoles) {
+        const perVariantRows = [];
+        for (const [holes, variant] of [[9, variant9], [18, variant18]]) {
+          if (!variant || variant.unsupported) continue;
+          // Fail closed per variant too: only trust rows from a
+          // response that genuinely shows the expected tomorrow date --
+          // never relabel a stale/wrong-date response under this holes
+          // count.
+          const variantDate = extractSlotDateFromBody(variant.bodyText);
+          if (variantDate !== slotDate) continue;
+          perVariantRows.push(
+            ...extractRowsFromAnchors(variant.anchorRows, courseConfig, finalUrl, title, slotDate, holes)
+          );
+        }
+        extractedRows = Array.from(
+          new Map(perVariantRows.map((row) => [row.external_id, row])).values()
+        );
+      } else {
+        extractedRows = extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate, null);
+      }
+    } else if (slotDate && isStableState) {
+      extractedRows = extractRowsFromAnchors(anchorRows, courseConfig, finalUrl, title, slotDate, null);
+    }
 
     const safeSlug =
       courseConfig.courseSlug ||
@@ -338,6 +430,7 @@ async function scrapeCourseInner(browser, courseConfig) {
       expectedSlotDate: isStableState ? null : expectedSlotDate,
       observedSlotDate: observedSlotDate || null,
       slotDate: slotDate || null,
+      holesSupport,
       extractedCount: extractedRows.length,
       extractedPreview: extractedRows.slice(0, 10),
       bodyPreview,

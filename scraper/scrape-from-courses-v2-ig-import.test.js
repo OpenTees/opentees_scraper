@@ -16,6 +16,7 @@ const {
   extractDateFromUrl,
   extractRowsFromAnchors,
   resolveIgSlotDate,
+  buildExternalId,
 } = require("./scrape-from-courses-v2-ig-import");
 
 test("tomorrowIsoDate is genuinely one calendar day after today", () => {
@@ -142,6 +143,49 @@ test("extractRowsFromAnchors: produces rows stamped with the exact slot date it 
   assert.equal(rows[0].slot_date, "2026-10-16");
   assert.equal(rows[0].slot_time, "08:00");
   assert.equal(rows[0].price, 36);
+});
+
+// --- Hole-count support (the page's own maxholes form field) -----------
+// Confirmed live against Addington Court: POSTing the teesheet form
+// with maxholes=18 vs maxholes=9 returns genuinely different, distinctly
+// priced content for the same date -- not a client-side filter over one
+// shared dataset.
+
+test("extractRowsFromAnchors: tags rows with the given holes count, defaulting to null (never guessed/defaulted to 18) when omitted", () => {
+  const courseConfig = { providerCourseId: "ig-addington", courseName: "Addington Court", googleRating: 4.2, googleReviews: 100, provider: "intelligent_golf", targetUrl: "https://example.com/visitorbooking/" };
+
+  const rowsNoHoles = extractRowsFromAnchors(
+    [{ text: "08:00 £36.00", href: "/book/123" }],
+    courseConfig, "https://example.com/visitorbooking/", "Addington Court", "2026-10-16",
+  );
+  assert.equal(rowsNoHoles[0].holes, null, "must stay null when the caller doesn't supply a holes count -- never invented");
+
+  const rows18 = extractRowsFromAnchors(
+    [{ text: "08:00 £36.00", href: "/book/123" }],
+    courseConfig, "https://example.com/visitorbooking/", "Addington Court", "2026-10-16", 18,
+  );
+  assert.equal(rows18[0].holes, 18);
+});
+
+test("extractRowsFromAnchors + buildExternalId: a 9-hole and 18-hole offer for the SAME time/price never collide/overwrite each other", () => {
+  const courseConfig = { providerCourseId: "ig-addington", courseName: "Addington Court", googleRating: 4.2, googleReviews: 100, provider: "intelligent_golf", targetUrl: "https://example.com/visitorbooking/" };
+
+  const rows9 = extractRowsFromAnchors(
+    [{ text: "08:00 £20.00", href: "/book/9" }],
+    courseConfig, "https://example.com/visitorbooking/", "Addington Court", "2026-10-16", 9,
+  );
+  const rows18 = extractRowsFromAnchors(
+    [{ text: "08:00 £20.00", href: "/book/18" }],
+    courseConfig, "https://example.com/visitorbooking/", "Addington Court", "2026-10-16", 18,
+  );
+
+  assert.notEqual(rows9[0].external_id, rows18[0].external_id, "identical time AND price, but distinct hole counts, must still produce distinct ids");
+});
+
+test("buildExternalId: distinguishes 9-hole and 18-hole offers even when price is identical", () => {
+  const id9 = buildExternalId("ig-addington", "2026-10-16", "08:00", 20, 9);
+  const id18 = buildExternalId("ig-addington", "2026-10-16", "08:00", 20, 18);
+  assert.notEqual(id9, id18);
 });
 
 test("extractSlotDateFromBody / extractDateFromUrl still correctly detect whatever date the page actually displays (used to verify the click worked)", () => {

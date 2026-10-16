@@ -76,8 +76,16 @@ function normalisePrice(priceText) {
   return Math.round(value);
 }
 
-function buildExternalId(providerCourseId, slotDate, slotTime, price) {
-  return `${providerCourseId}-${slotDate}-${slotTime}-${price ?? "na"}`;
+// Holes is part of the identity, not just the price: BRS's own teesheet
+// API confirms the same tee time can carry two genuinely independent
+// bookable products -- an 18-hole green fee and a 9-hole green fee,
+// each with its own BRS green_fees.id and its own price (e.g. Peacehaven
+// Golf & Fitness: 08:10 offers both an 18-hole round at £18 and a
+// 9-hole round at £11, confirmed live). Price alone would usually
+// differ too, but holes is included explicitly so two offers can never
+// collide even in the rare case their prices happen to match.
+function buildExternalId(providerCourseId, slotDate, slotTime, price, holes) {
+  return `${providerCourseId}-${slotDate}-${slotTime}-${price ?? "na"}-${holes ?? "na"}h`;
 }
 
 async function tryAcceptCookies(page) {
@@ -156,36 +164,48 @@ async function extractRowsFromBrsTeesheet(courseConfig, slotDate) {
     return { extractedRows: [], snapshotComplete: false };
   }
 
+  // One row per green_fees ENTRY, not per slot: BRS genuinely offers
+  // multiple independent bookable products for the same tee time (most
+  // commonly an 18-hole round and a 9-hole round), each with its own
+  // id, its own price, and its own num_holes -- confirmed live
+  // (Peacehaven Golf & Fitness, 08:10: 18-hole £18 vs 9-hole £11, two
+  // separate green_fees entries under the same slot.id). Taking only
+  // green_fees[0] would silently drop every other option.
   const rows = teesheetJson.data.tee_times
-    .map((slot) => {
-      const priceText = slot.green_fees?.[0]?.green_fee1_ball;
-      const price = priceText ? normalisePrice(priceText) : null;
+    .flatMap((slot) =>
+      (slot.green_fees || []).map((greenFee) => {
+        const price = greenFee.green_fee1_ball ? normalisePrice(greenFee.green_fee1_ball) : null;
+        const holes = greenFee.num_holes === "9" || greenFee.num_holes === "18" ? Number(greenFee.num_holes) : null;
 
-      return {
-        external_id: buildExternalId(
-          courseConfig.providerCourseId,
-          slotDate,
-          slot.time,
-          price
-        ),
-        provider_course_id: courseConfig.providerCourseId,
-        course_name: courseConfig.courseName,
-        slot_date: slotDate,
-        slot_time: slot.time,
-        price,
-        players: 4,
-        booking_url: courseConfig.targetUrl,
-        google_rating: courseConfig.googleRating,
-        google_reviews: courseConfig.googleReviews,
-        raw_payload: {
-          source: "courses_v2_import_brs_teesheet_api",
-          provider: courseConfig.provider,
-          club: courseConfig.courseName,
-          target_url: courseConfig.targetUrl,
-          provider_slot_id: slot.id,
-        },
-      };
-    })
+        return {
+          external_id: buildExternalId(
+            courseConfig.providerCourseId,
+            slotDate,
+            slot.time,
+            price,
+            holes
+          ),
+          provider_course_id: courseConfig.providerCourseId,
+          course_name: courseConfig.courseName,
+          slot_date: slotDate,
+          slot_time: slot.time,
+          price,
+          players: 4,
+          holes,
+          booking_url: courseConfig.targetUrl,
+          google_rating: courseConfig.googleRating,
+          google_reviews: courseConfig.googleReviews,
+          raw_payload: {
+            source: "courses_v2_import_brs_teesheet_api",
+            provider: courseConfig.provider,
+            club: courseConfig.courseName,
+            target_url: courseConfig.targetUrl,
+            provider_slot_id: slot.id,
+            green_fee_id: greenFee.id,
+          },
+        };
+      })
+    )
     .filter((row) => row.price !== null);
 
   return {
