@@ -176,6 +176,81 @@ test("extractRowsFromBrsTeesheet fails closed on an HTTP failure from the teeshe
   );
 });
 
+// --- Hole-count support (same tee time, genuinely different products) --
+// Confirmed live against Peacehaven Golf & Fitness: a single BRS slot
+// (one time, one slot.id) can carry TWO independent green_fees entries
+// -- an 18-hole round and a 9-hole round, each with its own price and
+// its own green_fees.id. Taking only green_fees[0] silently drops one
+// of them; these tests guard against that regressing.
+
+test("extractRowsFromBrsTeesheet emits ONE ROW PER green_fees entry, preserving both hole counts and their distinct prices for the same tee time", async () => {
+  const slotDate = tomorrowIsoDate();
+  await withMockedFetch(
+    [
+      jsonResponse(200, [{ id: 1, name: "1st Tee" }]),
+      jsonResponse(200, {
+        data: {
+          tee_date: slotDate,
+          tee_times: [
+            {
+              id: 158422,
+              time: "08:10",
+              green_fees: [
+                { id: 27, green_fee1_ball: "18.00", num_holes: "18" },
+                { id: 28, green_fee1_ball: "11.00", num_holes: "9" },
+              ],
+            },
+          ],
+        },
+      }),
+    ],
+    async () => {
+      const { extractedRows } = await extractRowsFromBrsTeesheet(COURSE_CONFIG, slotDate);
+      assert.equal(extractedRows.length, 2, "both the 18-hole and 9-hole offers must survive, not just the first");
+
+      const eighteen = extractedRows.find((r) => r.holes === 18);
+      const nine = extractedRows.find((r) => r.holes === 9);
+      assert.ok(eighteen, "18-hole offer present");
+      assert.ok(nine, "9-hole offer present");
+
+      assert.equal(eighteen.price, 18);
+      assert.equal(nine.price, 11);
+      assert.equal(eighteen.slot_time, "08:10");
+      assert.equal(nine.slot_time, "08:10", "same tee time for both offers");
+
+      assert.notEqual(eighteen.external_id, nine.external_id, "must never collide/overwrite each other");
+    },
+  );
+});
+
+test("extractRowsFromBrsTeesheet leaves holes null (never invents 18) when BRS doesn't report a recognised num_holes value", async () => {
+  const slotDate = tomorrowIsoDate();
+  await withMockedFetch(
+    [
+      jsonResponse(200, [{ id: 1, name: "1st Tee" }]),
+      jsonResponse(200, {
+        data: {
+          tee_date: slotDate,
+          tee_times: [
+            { id: 1, time: "07:00", green_fees: [{ green_fee1_ball: "40.00", num_holes: "" }] },
+          ],
+        },
+      }),
+    ],
+    async () => {
+      const { extractedRows } = await extractRowsFromBrsTeesheet(COURSE_CONFIG, slotDate);
+      assert.equal(extractedRows.length, 1);
+      assert.equal(extractedRows[0].holes, null, "must stay null, never default/guess 18");
+    },
+  );
+});
+
+test("buildExternalId: distinguishes 9-hole and 18-hole offers even if their prices happened to be identical", () => {
+  const id18 = buildExternalId("brs-peacehaven9", "2026-10-16", "08:10", 20, 18);
+  const id9 = buildExternalId("brs-peacehaven9", "2026-10-16", "08:10", 20, 9);
+  assert.notEqual(id18, id9);
+});
+
 test("extractRowsFromBrsTeesheet drops a slot with no parseable price rather than importing a null-price row", async () => {
   const slotDate = tomorrowIsoDate();
   await withMockedFetch(
