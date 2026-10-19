@@ -273,12 +273,26 @@ async function fetchHolesVariant(page, maxholes) {
       params.set(key, key === "maxholes" ? String(maxholes) : value);
     }
 
-    const res = await fetch(window.location.href, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params.toString(),
-    });
+    let res;
+    try {
+      res = await fetch(window.location.href, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      });
+    } catch {
+      return { httpFailed: true };
+    }
+
+    // Reject unsuccessful HTTP responses explicitly -- an error/WAF/login
+    // page can still return 200-with-garbage in some cases, but a non-2xx
+    // status is the clearest, cheapest signal that this response must
+    // not be trusted, so it's checked before any parsing is attempted.
+    if (!res.ok) return { httpFailed: true, status: res.status };
+
     const text = await res.text();
+    if (!text) return { httpFailed: true };
+
     const doc = new DOMParser().parseFromString(text, "text/html");
     const bodyText = doc.body ? doc.body.textContent : "";
     const anchorRows = Array.from(doc.querySelectorAll("a")).map((a) => ({
@@ -388,13 +402,17 @@ async function scrapeCourseInner(browser, courseConfig) {
         fetchHolesVariant(page, 18).catch(() => null),
       ]);
 
-      const supportsHoles = [variant9, variant18].some((v) => v && !v.unsupported);
+      const supportsHoles = [variant9, variant18].some((v) => v && !v.unsupported && !v.httpFailed);
       holesSupport = supportsHoles;
 
       if (supportsHoles) {
         const perVariantRows = [];
         for (const [holes, variant] of [[9, variant9], [18, variant18]]) {
-          if (!variant || variant.unsupported) continue;
+          // Explicitly reject anything other than a genuine, successful
+          // response before trusting it: no form on the page (null), no
+          // maxholes field (unsupported), a network error or non-2xx
+          // HTTP status (httpFailed) -- none of these are parsed.
+          if (!variant || variant.unsupported || variant.httpFailed) continue;
           // Fail closed per variant too: only trust rows from a
           // response that genuinely shows the expected tomorrow date --
           // never relabel a stale/wrong-date response under this holes
