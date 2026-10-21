@@ -42,6 +42,16 @@ const WORKFLOW_DISCOVERY = "golfnow-discovery.yml";
 const WORKFLOW_PROMOTE = "golfnow-promote.yml";
 const WORKFLOW_IMPORT = "golfnow-import.yml";
 
+// Explicit, documented ceiling on the extracted summary.json this
+// controller will ever read. A full-scale import's summary legitimately
+// grows with the number of courses/rows scraped (run #39's crash was
+// ~465 courses / 17,124 rows), so this is set well above any size seen
+// in production, not tuned to today's exact numbers -- but it is still a
+// bound, not "whatever fits in memory", so a corrupted or runaway
+// artifact fails closed (null, see downloadSummaryArtifact) instead of
+// exhausting memory on the runner.
+const MAX_SUMMARY_ARTIFACT_BYTES = 50 * 1024 * 1024; // 50MB
+
 // Pure: given the global config and whether any batch is already
 // mid-flight, decide what (if anything) to do this tick.
 function decideTick(config, batches) {
@@ -261,16 +271,58 @@ function buildGithubClient({ token, repository }) {
 
       // Minimal zip read: summary.json is the only file this controller
       // needs, and Node has no built-in zip reader -- shell out to
-      // `unzip -p` (present on the ubuntu-latest runner) rather than
-      // add a new dependency for one file.
+      // `unzip` (present on the ubuntu-latest runner) rather than add a
+      // new dependency for one file.
+      //
+      // Extract to a file (-d), never pipe through `unzip -p` into a
+      // captured stdout buffer: execFileSync's captured stdout is bounded
+      // by Node's default 1MB maxBuffer, and once summary.json crosses
+      // that it throws ENOBUFS -- the confirmed cause of controller run
+      // #39's crash (465 courses / 17,124 extracted rows produced a
+      // summary.json over 1MB). Extracting to disk has no such ceiling,
+      // so MAX_SUMMARY_ARTIFACT_BYTES below is this function's own
+      // explicit, documented bound, not an accidental one.
       const { execFileSync } = require("node:child_process");
       const fs = require("node:fs");
       const os = require("node:os");
       const path = require("node:path");
-      const tmpZip = path.join(os.tmpdir(), `artifact-${runId}.zip`);
-      fs.writeFileSync(tmpZip, buffer);
-      const summaryText = execFileSync("unzip", ["-p", tmpZip, "summary.json"], { encoding: "utf8" });
-      return JSON.parse(summaryText);
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `expansion-artifact-${runId}-`));
+      try {
+        const tmpZip = path.join(tmpDir, "artifact.zip");
+        fs.writeFileSync(tmpZip, buffer);
+
+        try {
+          execFileSync("unzip", ["-o", "-q", tmpZip, "summary.json", "-d", tmpDir]);
+        } catch (extractError) {
+          console.error(`Unable to extract summary.json from run ${runId}'s artifact: ${extractError.message}`);
+          return null;
+        }
+
+        const summaryPath = path.join(tmpDir, "summary.json");
+        let size;
+        try {
+          size = fs.statSync(summaryPath).size;
+        } catch {
+          console.error(`Run ${runId}'s artifact did not contain summary.json`);
+          return null;
+        }
+        if (size > MAX_SUMMARY_ARTIFACT_BYTES) {
+          console.error(
+            `summary.json from run ${runId} is ${size} bytes, exceeding the ${MAX_SUMMARY_ARTIFACT_BYTES}-byte limit -- refusing to read it`,
+          );
+          return null;
+        }
+
+        const summaryText = fs.readFileSync(summaryPath, "utf8");
+        try {
+          return JSON.parse(summaryText);
+        } catch (parseError) {
+          console.error(`summary.json from run ${runId} is not valid JSON: ${parseError.message}`);
+          return null;
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     },
   };
 }
